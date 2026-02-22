@@ -1,0 +1,259 @@
+
+Checkpoint B — Offline Pipeline Inspection Report
+Provider: gemini  |  Fast: gemini-2.5-flash  |  Powerful: gemini-2.5-pro
+
+========================================================================
+  1. PIPELINE SUMMARY — All 11 BIRD dev databases
+========================================================================
+
+Databases processed: 11
+  california_schools, card_games, codebase_community, debit_card_specializing, european_football_2, financial, formula_1, student_club, superhero, thrombosis_prediction, toxicology
+
+DB                              Profile  Summary    DDL    MD        LSH      FAISS
+--------------------------------------------------------------------------------
+california_schools                    ✓        ✓      ✓     ✓      1.2GB    136.7KB
+card_games                            ✓        ✓      ✓     ✓      2.7GB    176.7KB
+codebase_community                    ✓        ✓      ✓     ✓      2.8GB    109.1KB
+debit_card_specializing               ✓        ✓      ✓     ✓    339.8MB     32.3KB
+european_football_2                   ✓        ✓      ✓     ✓      1.8GB    305.7KB
+financial                             ✓        ✓      ✓     ✓    497.2MB     84.5KB
+formula_1                             ✓        ✓      ✓     ✓    697.6MB    144.4KB
+student_club                          ✓        ✓      ✓     ✓    297.6MB     73.8KB
+superhero                             ✓        ✓      ✓     ✓     20.3MB     47.7KB
+thrombosis_prediction                 ✓        ✓      ✓     ✓     88.4MB     98.3KB
+toxicology                            ✓        ✓      ✓     ✓    283.8MB     16.9KB
+
+Example store: 14.5MB, metadata: 5.3MB
+Total LSH index size: 10.86 GB
+========================================================================
+  2. CALIFORNIA_SCHOOLS — LSH Index Analysis
+========================================================================
+
+Loading LSH index from data/preprocessed/indices/california_schools_lsh.pkl …
+Total indexed entries: 267,935
+
+--- Per-table entry counts ---
+  schools: 185,667 values
+  frpm: 75,174 values
+  satscores: 7,094 values
+
+--- Top 20 columns by value count ---
+  schools.CDSCode: 17,686
+  schools.School: 13,875
+  schools.StreetAbr: 13,633
+  schools.Street: 13,593
+  schools.MailStrAbr: 12,429
+  schools.MailStreet: 12,395
+  schools.NCESSchool: 12,321
+  schools.Latitude: 11,436
+  schools.Longitude: 11,278
+  schools.Zip: 11,184
+  schools.Phone: 10,632
+  schools.AdmEmail1: 10,492
+  schools.MailZip: 10,298
+  frpm.CDSCode: 9,986
+  frpm.School Code: 9,942
+  frpm.Percent (%) Eligible Free (K-12): 8,658
+  frpm.School Name: 8,652
+  frpm.Percent (%) Eligible FRPM (K-12): 8,623
+  frpm.Percent (%) Eligible FRPM (Ages 5-17): 8,557
+  frpm.Percent (%) Eligible Free (Ages 5-17): 8,552
+
+--- Fuzzy query: 'Alameda' (county) ---
+  schools.County = 'Alameda'  sim=1.000  exact=True
+  frpm.County Name = 'Alameda'  sim=1.000  exact=True
+  schools.MailCity = 'Alameda'  sim=1.000  exact=True
+  satscores.cname = 'Alameda'  sim=1.000  exact=True
+  schools.City = 'Alameda'  sim=1.000  exact=True
+
+--- Fuzzy query: 'Berkley' (typo for 'Berkeley') ---
+  schools.MailCity = 'Berkley'  sim=1.000  exact=True
+  schools.City = 'Berkeley'  sim=0.383  exact=False
+  schools.MailCity = 'Berkeley'  sim=0.383  exact=False
+  schools.City = 'Oakley'  sim=0.289  exact=False
+  schools.MailCity = 'Oakley'  sim=0.289  exact=False
+
+--- Fuzzy query: 'Los Angelos' (typo for 'Los Angeles') ---
+  schools.County = 'Los Angeles'  sim=0.742  exact=False
+  schools.City = 'Los Angeles'  sim=0.742  exact=False
+  satscores.cname = 'Los Angeles'  sim=0.742  exact=False
+  schools.MailCity = 'Los Angeles'  sim=0.742  exact=False
+  frpm.County Name = 'Los Angeles'  sim=0.742  exact=False
+========================================================================
+  3. CALIFORNIA_SCHOOLS — FAISS Semantic Field Search
+========================================================================
+
+FAISS index has 89 fields
+
+--- Query: 'county name' ---
+  frpm.County Name  score=0.5729
+    → This field provides the full name of the county in California. It acts as a huma
+  schools.County  score=0.5080
+    → The County field specifies the administrative county in California where the sch
+  frpm.County Code  score=0.4388
+    → The County Code is a two-digit text code uniquely assigned to each of California
+  satscores.cname  score=0.3396
+    → This column indicates the county in California where the school or district is l
+  schools.DOCType  score=0.2977
+    → This field specifies the complete name for the type of administrative district t
+
+--- Query: 'free meal count in schools' ---
+  frpm.FRPM Count (Ages 5-17)  score=0.7726
+    → This column records the total number of students aged 5 to 17 who are eligible f
+  frpm.Free Meal Count (Ages 5-17)  score=0.7673
+    → This column represents the total number of students between 5 and 17 years old w
+  frpm.Percent (%) Eligible Free (Ages 5-17)  score=0.7323
+    → This column indicates the proportion of students aged 5 to 17 who are eligible f
+  frpm.Free Meal Count (K-12)  score=0.7169
+    → The `Free Meal Count (K-12)` column records the exact number of students from ki
+  frpm.Percent (%) Eligible Free (K-12)  score=0.7167
+    → This field represents the proportion of students in grades K-12 who are eligible
+
+--- Query: 'school district enrollment' ---
+  frpm.Enrollment (K-12)  score=0.6381
+    → The 'Enrollment (K-12)' field provides the total student count for Kindergarten 
+  schools.District  score=0.6204
+    → The District field provides the full name of the school district responsible for
+  frpm.District Code  score=0.5912
+    → The District Code is an integer that uniquely identifies each school district wi
+  frpm.Enrollment (Ages 5-17)  score=0.5679
+    → The 'Enrollment (Ages 5-17)' column stores the total numerical count of students
+  satscores.sname  score=0.5556
+    → This column contains the name of the school. It's important to note that approxi
+
+--- Query: 'academic performance score' ---
+  satscores.AvgScrWrite  score=0.5721
+    → This column records the average score received by students on the SAT Writing se
+  satscores.NumGE1500  score=0.5721
+    → This column indicates the count of students who achieved a combined SAT score of
+  satscores.AvgScrRead  score=0.5649
+    → This column stores the average score achieved by students on the SAT Reading sec
+  satscores.AvgScrMath  score=0.5492
+    → This column contains the average score obtained by students on the SAT Math sect
+  satscores.dname  score=0.4837
+    → This column provides the name of the school district associated with the SAT sco
+
+--- Query: 'student eligibility for reduced price lunch' ---
+  frpm.FRPM Count (Ages 5-17)  score=0.7251
+    → This column records the total number of students aged 5 to 17 who are eligible f
+  frpm.Free Meal Count (Ages 5-17)  score=0.6436
+    → This column represents the total number of students between 5 and 17 years old w
+  frpm.Percent (%) Eligible Free (K-12)  score=0.6295
+    → This field represents the proportion of students in grades K-12 who are eligible
+  frpm.Percent (%) Eligible Free (Ages 5-17)  score=0.6069
+    → This column indicates the proportion of students aged 5 to 17 who are eligible f
+  frpm.Percent (%) Eligible FRPM (Ages 5-17)  score=0.6040
+    → This column represents the percentage of students aged 5 to 17 who qualify for F
+========================================================================
+  4. EXAMPLE STORE — Few-Shot Retrieval
+========================================================================
+
+Example store: 9428 entries
+
+--- Query: 'free meal counts in schools' (excluding california_schools) ---
+  [menu] Q: Among the dishes, how many of them are for free?
+         SQL: SELECT COUNT(*) FROM Dish WHERE lowest_price = 0
+
+  [menu] Q: Give me the name and menu price of dishes that were free.
+         SQL: SELECT T2.name, T1.price FROM MenuItem AS T1 INNER JOIN Dish AS T2 ON 
+
+  [student_loan] Q: State the number of students do not have payment due.
+         SQL: SELECT COUNT(name) FROM no_payment_due WHERE bool = 'neg'
+
+
+--- Query: 'how many cards have converted mana cost greater than 5' (excluding card_games) ---
+  [works_cycles] Q: Which product cost the least in 2013?
+         SQL: SELECT ProductID FROM ProductCostHistory WHERE StartDate LIKE '2013%' 
+
+  [sales] Q: In sales with a quantity of 60, how many of them have a price not grea
+         SQL: SELECT COUNT(T1.ProductID) FROM Products AS T1 INNER JOIN Sales AS T2 
+
+  [works_cycles] Q: What is the total cost for all the orders placed on 5/29/2013?
+         SQL: SELECT SUM(TotalDue) FROM PurchaseOrderHeader WHERE OrderDate LIKE '20
+
+
+--- Query: 'highest salary in the company' (excluding financial) ---
+  [retail_world] Q: What are the highest salary earn by the the employee and what is his/h
+         SQL: SELECT Salary, Title FROM Employees WHERE Salary = ( SELECT MAX(Salary
+
+  [retail_world] Q: What is the full name of the employee with the highest salary?
+         SQL: SELECT FirstName, LastName FROM Employees WHERE Salary = ( SELECT MAX(
+
+  [human_resources] Q: Which employee has the highest salary? Please give his or her full nam
+         SQL: SELECT firstname, lastname FROM employee ORDER BY salary DESC LIMIT 1
+
+========================================================================
+  5. FIELD SUMMARY QUALITY — california_schools spot check
+========================================================================
+
+Total field summaries: 89
+
+  frpm.CDSCode:
+    A unique identifier for a school, district, or county in California.
+
+  frpm.Academic Year:
+    Represents the academic year to which the data corresponds.
+
+  frpm.County Code:
+    A numerical code identifying the county in California.
+
+  frpm.District Code:
+    A unique integer code identifying a school district.
+
+  frpm.School Code:
+    A unique code identifying an individual school.
+
+  frpm.County Name:
+    The name of the county where the school or district is located.
+
+  frpm.District Name:
+    The name of the school district.
+
+  frpm.School Name:
+    The name of the school.
+
+  frpm.District Type:
+    Categorization of the school district by type.
+
+  frpm.School Type:
+    Categorization of the school by type.
+
+  frpm.Educational Option Type:
+    The educational program or option offered by the school.
+
+  frpm.NSLP Provision Status:
+    Status regarding participation in National School Lunch Program (NSLP) provisions.
+
+  frpm.Charter School (Y/N):
+    A binary indicator (0 or 1) showing if a school is a charter school.
+
+  frpm.Charter School Number:
+    The unique identification number assigned to a charter school.
+
+  frpm.Charter Funding Type:
+    Specifies the funding model for a charter school.
+
+Fields with default (fallback) summaries: 0/89
+========================================================================
+  6. SUMMARIZER BATCH FAILURE ANALYSIS
+========================================================================
+
+During the pipeline run, several batch-of-6 failures occurred:
+  - card_games/cards: 5 batch failures → retried individually
+  - card_games/sets:  1 batch failure  → retried individually
+
+Root cause: Gemini context window limit hit when a batch of 6 columns
+includes very long purchaseUrls/text fields. Individual retry succeeds
+because each column fits within the context limit alone.
+
+Impact: Slight cost increase (individual retries use more API calls)
+but correctness is maintained (individual retry always succeeds).
+
+Recommendation: Reduce BATCH_SIZE from 6 to 4 for databases with
+long free-text columns, or add a token-estimate pre-check before batching.
+
+
+========================================================================
+  END OF CHECKPOINT B INSPECTION REPORT
+========================================================================
+

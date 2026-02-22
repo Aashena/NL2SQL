@@ -41,6 +41,9 @@ from src.config.settings import settings  # noqa: E402  (must be after sys.path 
 from src.preprocessing.profiler import profile_database  # noqa: E402
 from src.preprocessing.summarizer import summarize_database  # noqa: E402
 from src.preprocessing.schema_formatter import format_and_save_schemas  # noqa: E402
+from src.indexing.lsh_index import LSHIndex  # noqa: E402
+from src.indexing.faiss_index import FAISSIndex  # noqa: E402
+from src.indexing.example_store import ExampleStore  # noqa: E402
 
 try:
     from tqdm import tqdm as _tqdm
@@ -204,9 +207,10 @@ def _run_summarize(db_id: str, dirs: dict[str, Path], force: bool) -> None:
         return
     log.info("[%s] Summarizing …", db_id)
 
+    import asyncio  # local import
     from src.preprocessing.profiler import _load_profile_from_json  # local import
     profile = _load_profile_from_json(profile_cache)
-    summarize_database(profile, output_dir=str(dirs["summaries"]))
+    asyncio.run(summarize_database(profile, output_dir=str(dirs["summaries"])))
 
 
 def _run_format(db_id: str, dirs: dict[str, Path], force: bool) -> None:
@@ -238,6 +242,59 @@ def _run_format(db_id: str, dirs: dict[str, Path], force: bool) -> None:
     format_and_save_schemas(profile, summary, output_dir=str(dirs["schemas"]))
 
 
+def _run_indices(
+    db_id: str,
+    sqlite_path: Path,
+    dirs: dict[str, Path],
+    train_data: list,
+    force: bool,
+) -> None:
+    """Op 1: Build LSH index, FAISS index, and (shared) example store."""
+    summary_cache = dirs["summaries"] / f"{db_id}.json"
+    if not summary_cache.exists():
+        raise RuntimeError(
+            f"Summary for {db_id!r} not found. Run the 'summarize' step first."
+        )
+
+    lsh_path = dirs["indices"] / f"{db_id}_lsh.pkl"
+    faiss_index_path = dirs["indices"] / f"{db_id}_faiss.index"
+    faiss_fields_path = dirs["indices"] / f"{db_id}_faiss_fields.json"
+    ex_faiss_path = dirs["indices"] / "example_store.faiss"
+    ex_meta_path = dirs["indices"] / "example_store_metadata.json"
+
+    # LSH index
+    if force or not lsh_path.exists():
+        log.info("[%s] Building LSH index …", db_id)
+        lsh = LSHIndex()
+        lsh.build(db_path=str(sqlite_path), db_id=db_id)
+        lsh.save(str(lsh_path))
+    else:
+        log.debug("[%s] LSH index cached — skipping", db_id)
+
+    # FAISS index
+    if force or not faiss_index_path.exists() or not faiss_fields_path.exists():
+        log.info("[%s] Building FAISS index …", db_id)
+        from src.preprocessing.summarizer import _load_summary_from_json
+        summary = _load_summary_from_json(summary_cache)
+        faiss_idx = FAISSIndex()
+        faiss_idx.build(summary.field_summaries)
+        faiss_idx.save(str(faiss_index_path), str(faiss_fields_path))
+    else:
+        log.debug("[%s] FAISS index cached — skipping", db_id)
+
+    # Example store (shared — only build once)
+    if force or not ex_faiss_path.exists() or not ex_meta_path.exists():
+        if train_data:
+            log.info("Building shared example store from %d entries …", len(train_data))
+            ex_store = ExampleStore()
+            ex_store.build(train_data)
+            ex_store.save(str(ex_faiss_path), str(ex_meta_path))
+        else:
+            log.warning("No training data — skipping example store build")
+    else:
+        log.debug("Example store cached — skipping")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -259,8 +316,8 @@ def _parse_args() -> argparse.Namespace:
         required=True,
         choices=["all", "profile", "summarize", "format", "indices"],
         help=(
-            "Processing step to run.  'all' runs profile → summarize → format. "
-            "'indices' is a placeholder (implemented in Prompt 6)."
+            "Processing step to run.  'all' runs profile → summarize → format → indices. "
+            "'indices' builds LSH + FAISS indices and the shared example store."
         ),
     )
     parser.add_argument(
@@ -281,17 +338,9 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:  # noqa: C901  (complexity OK for a CLI entry-point)
     args = _parse_args()
 
-    # Validate step
-    if args.step == "indices":
-        log.error(
-            "The 'indices' step is not yet implemented (it will be added in Prompt 6). "
-            "Use --step all | profile | summarize | format."
-        )
-        return 1
-
     # Determine which steps to run
     if args.step == "all":
-        steps = ["profile", "summarize", "format"]
+        steps = ["profile", "summarize", "format", "indices"]
     else:
         steps = [args.step]
 
@@ -310,6 +359,16 @@ def main() -> int:  # noqa: C901  (complexity OK for a CLI entry-point)
     )
 
     dirs = _output_dirs(settings.preprocessed_dir)
+
+    # Load training data for the example store (only if indices step is included)
+    train_data: list = []
+    if "indices" in steps:
+        from src.data.bird_loader import load_bird_split
+        try:
+            train_data = load_bird_split("train", data_dir=settings.bird_data_dir)
+            log.info("Loaded %d training examples for example store", len(train_data))
+        except Exception:
+            log.warning("Could not load training data — example store will be skipped")
 
     n_processed = 0
     n_skipped = 0
@@ -348,6 +407,14 @@ def main() -> int:  # noqa: C901  (complexity OK for a CLI entry-point)
                     if not args.force and ddl_file.exists() and md_file.exists():
                         continue
                     _run_format(db_id, dirs, force=args.force)
+                    ran_any = True
+
+                elif step == "indices":
+                    lsh_path = dirs["indices"] / f"{db_id}_lsh.pkl"
+                    faiss_path = dirs["indices"] / f"{db_id}_faiss.index"
+                    if not args.force and lsh_path.exists() and faiss_path.exists():
+                        continue
+                    _run_indices(db_id, sqlite_path, dirs, train_data, force=args.force)
                     ran_any = True
 
             elapsed = time.perf_counter() - t0
