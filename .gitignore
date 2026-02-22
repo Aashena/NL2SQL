@@ -1,2 +1,61 @@
+# Claude Code settings (keep skills, ignore everything else)
 /.claude/*
 !/.claude/skills/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*.pyd
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Distribution / packaging
+*.egg-info/
+dist/
+build/
+*.egg
+MANIFEST
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Type checking
+.mypy_cache/
+.pytype/
+
+# Environment / secrets — NEVER commit
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# ── Project-specific generated / downloaded data ──────────────────────────────
+
+# BIRD dataset (~7GB) — download with scripts/download_bird.py
+data/bird/
+
+# Preprocessed artifacts (profiles, summaries, schemas, indices)
+# Regenerate with: python scripts/run_offline_preprocessing.py --split dev --step all
+data/preprocessed/
+
+# LLM response cache (local dev only, toggled via CACHE_LLM_RESPONSES=true)
+data/cache/
+
+# Evaluation results (regenerable)
+results/
+
+# Spacy downloaded models
+# (downloaded via: python -m spacy download en_core_web_sm)
+en_core_web_sm/
