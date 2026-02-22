@@ -1,0 +1,42 @@
+{
+  "phase": 1,
+  "current_step": "checkpoint_A",
+  "status": "in_progress",
+  "steps": {
+    "prompt_1": {
+      "status": "completed",
+      "tests_passed": true,
+      "notes": "12/12 tests pass. Key decisions: (1) name column nullable to allow NULL rows per fixture. (2) Settings adds cache_llm_responses + log_level. (3) Timeout via threading.Thread + conn.interrupt() (not SIGALRM — macOS compat). (4) bird_loader tolerates alternative SQL field names. (5) 6 tests for bird_loader, 6 for database."
+    },
+    "prompt_2": {
+      "status": "completed",
+      "tests_passed": true,
+      "notes": "31 tests pass. Key decisions: (1) datasketch.MinHash.hashvalues returns numpy.uint64 — convert via [int(v) for v in mh.hashvalues]. (2) SQLite type affinity: 5-rule algorithm. (3) avg_length only for TEXT; min/max/avg_value only for INTEGER/REAL/NUMERIC. (4) Empty tables: total_count=0, null_rate=0.0 guard. (5) JSON cache via dataclasses.asdict() + json.dump(default=str). (6) minhash_bands: character 3-grams; strings <=2 chars also update mh directly."
+    },
+    "prompt_3":      {"status": "completed",  "tests_passed": true,  "notes": "10/10 tests pass. Key decisions: (1) Batching via dict keyed by table_name, _BATCH_SIZE=6; (2) Retry decorator wraps inner _call() closure so tenacity reraises correctly; (3) cache_control ephemeral on system prompt block works with anthropic-0.83.0 SDK (passed as list of dicts); (4) Missing columns filled with deterministic default: 'The {col} field in the {table} table.'; (5) Length enforcement via simple slice [:200] / [:1000]; (6) JSON persistence via dataclasses.asdict() matching profiler pattern; (7) anthropic package was not yet installed — added to project dependencies."},
+    "prompt_4":      {"status": "completed", "tests_passed": true, "notes": "11/11 tests pass (10 required + 1 bonus). Key decisions: (1) needs_quoting() uses re.compile('^[A-Za-z0-9_]+$') regex — returns True for any name containing spaces, parens, hyphens, slashes, etc. (2) DDL long_summary truncated to 120 chars with '...'; sample row values truncated to 50 chars. (3) NULL sample values: per-column 'NULL' string if sample_values is empty list. (4) Last column in DDL block: trailing comma stripped cleanly — handles both ', --' and bare ',' endings. (5) Markdown sample values: first 3, each truncated to 30 chars with '...'. (6) format_and_save_schemas() creates output_dir if needed, writes {db_id}_ddl.sql and {db_id}_markdown.md. (7) Offline script: --split / --step / --db / --force flags; tqdm progress bar; per-DB error catching; summary at end; indices step deferred to Prompt 6."},
+    "checkpoint_A":  {"status": "pending",   "requires_user": true, "notes": "Review Ops 0a+0b+0c: run real profile on one BIRD db, show profile JSON + DDL/Markdown schema, discuss improvements"},
+    "prompt_5":      {"status": "pending",   "tests_passed": null, "notes": "Op 1a: lsh_index.py + test_lsh_index.py (10 tests)"},
+    "prompt_6":      {"status": "pending",   "tests_passed": null, "notes": "Ops 1b+1c: faiss_index.py + example_store.py + offline_pipeline.py + 3 test files"},
+    "checkpoint_B":  {"status": "pending",   "requires_user": true, "notes": "Run full offline pipeline on BIRD dev; review field summaries, LSH quality, FAISS results. BIRD data must be downloaded first."},
+    "prompt_7":      {"status": "pending",   "tests_passed": null, "notes": "cache_manager.py + context_grounder.py + test_cache_manager.py + test_context_grounder.py"},
+    "prompt_8":      {"status": "pending",   "tests_passed": null, "notes": "Op 6: schema_linker.py + test_schema_linker.py (12 tests)"},
+    "checkpoint_C":  {"status": "pending",   "requires_user": true, "notes": "Test Ops 5+6 on 5 real BIRD questions with cache enabled; check S1/S2 field selection quality, hallucination filtering"},
+    "prompt_9":      {"status": "pending",   "tests_passed": null, "notes": "Op 7A: base_generator.py + reasoning_generator.py + test_reasoning_generator.py"},
+    "prompt_10":     {"status": "pending",   "tests_passed": null, "notes": "Ops 7B+7C: standard_generator.py + icl_generator.py + test files + test_generation_diversity.py"},
+    "checkpoint_D":  {"status": "pending",   "requires_user": true, "notes": "Run pipeline through Op 7 on 10 BIRD questions; check oracle upper bound, diversity, and candidate quality"},
+    "prompt_11":     {"status": "pending",   "tests_passed": null, "notes": "Op 8: query_fixer.py + test_query_fixer.py (12 tests)"},
+    "prompt_12":     {"status": "pending",   "tests_passed": null, "notes": "Op 9: adaptive_selector.py + test_adaptive_selector.py (12 tests)"},
+    "checkpoint_E":  {"status": "pending",   "requires_user": true, "notes": "Manual e2e on 5 questions calling each component in sequence; review interfaces before pipeline wiring"},
+    "prompt_13":     {"status": "pending",   "tests_passed": null, "notes": "Pipeline: online_pipeline.py + test_online_pipeline.py + run_evaluation.py"},
+    "prompt_14":     {"status": "pending",   "tests_passed": null, "notes": "Evaluation: evaluator.py + metrics.py + analyze_results.py + test_evaluator.py"},
+    "prompt_15":     {"status": "pending",   "tests_passed": null, "notes": "E2E tests: test_bird_mini.py + test_bird_full.py + run 50-question smoke test"},
+    "checkpoint_final": {"status": "pending", "requires_user": true, "notes": "Full BIRD dev evaluation (1534 questions); target EX >= 68%"}
+  },
+  "notes": {
+    "resume_instruction": "Say 'continue implementation' at start of new session. Read this file, find first step with status != completed, resume from there.",
+    "checkpoint_instruction": "Checkpoints require_user=true — present real output, ask user which improvements to implement, then proceed.",
+    "compact_reminder": "Run /compact before prompts 8, 12, and 15 if session is long (per Implementation_Prompts.md).",
+    "bird_data_note": "BIRD dataset must be downloaded before Checkpoint B. See Step 2.1 of Phase1_implementation_details.md."
+  }
+}

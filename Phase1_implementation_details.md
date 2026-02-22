@@ -12,18 +12,21 @@ This document provides a step-by-step implementation guide for Phase 1 of the Ad
 
 The following adjustments are made to the original method plan and implementation guide, reflecting the Claude-primary API constraint and opportunities for improvement:
 
-### 1. Claude Model Assignment (Cost-Optimized)
-| Task | Model | Rationale |
-|------|-------|-----------|
-| Keyword extraction | `claude-haiku-4-5-20251001` | Simple extraction, latency-sensitive |
-| Field summarization (Op 0) | `claude-haiku-4-5-20251001` | Bulk offline task, cost-sensitive |
-| Schema linking column selection | `claude-sonnet-4-6` | Requires structured reasoning over metadata |
-| Generator A (Reasoning) | `claude-sonnet-4-6` + extended thinking | Replicates RL-tuned reasoning generator |
-| Generator B1 (Standard) | `claude-haiku-4-5-20251001` | Cost-effective, fast, diverse |
-| Generator B2 (Complex SQL) | `claude-sonnet-4-6` | Advanced SQL patterns require stronger model |
-| Generator C (ICL) | `claude-sonnet-4-6` | Few-shot reasoning benefits from strong model |
-| Query fixer | `claude-haiku-4-5-20251001` | Error correction is targeted and bounded |
-| Pairwise selection | `claude-haiku-4-5-20251001` | Comparative judgment at scale |
+### 1. Model Tier Assignment (Provider-Configurable)
+
+Provider is selected via `LLM_PROVIDER` env var. Override tiers with `MODEL_FAST`, `MODEL_POWERFUL`, `MODEL_REASONING`.
+
+| Task | Tier | Anthropic default | Gemini default | Rationale |
+|------|------|-------------------|----------------|-----------|
+| Keyword extraction | `model_fast` | `claude-haiku-4-5-20251001` | `gemini-2.5-flash` | Simple extraction, latency-sensitive |
+| Field summarization (Op 0) | `model_fast` | `claude-haiku-4-5-20251001` | `gemini-2.5-flash` | Bulk offline task, cost-sensitive |
+| Schema linking column selection | `model_powerful` | `claude-sonnet-4-6` | `gemini-2.5-pro` | Requires structured reasoning over metadata |
+| Generator A (Reasoning) | `model_reasoning` + thinking | `claude-sonnet-4-6` | `gemini-2.5-flash` | Replicates RL-tuned reasoning generator |
+| Generator B1 (Standard) | `model_fast` | `claude-haiku-4-5-20251001` | `gemini-2.5-flash` | Cost-effective, fast, diverse |
+| Generator B2 (Complex SQL) | `model_powerful` | `claude-sonnet-4-6` | `gemini-2.5-pro` | Advanced SQL patterns require stronger model |
+| Generator C (ICL) | `model_powerful` | `claude-sonnet-4-6` | `gemini-2.5-pro` | Few-shot reasoning benefits from strong model |
+| Query fixer | `model_fast` | `claude-haiku-4-5-20251001` | `gemini-2.5-flash` | Error correction is targeted and bounded |
+| Pairwise selection | `model_fast` | `claude-haiku-4-5-20251001` | `gemini-2.5-flash` | Comparative judgment at scale |
 
 ### 2. New Improvements Over Original Plans
 - **Prompt caching**: Use Anthropic's prompt caching (`cache_control`) on large schema/system prompt blocks to cut schema-linking and generation costs by ~60–80% for repeated databases.
@@ -37,21 +40,21 @@ The following adjustments are made to the original method plan and implementatio
 ### 3. Generator Configuration for Phase 1
 
 ```
-Generator A  — Reasoning (claude-sonnet-4-6, extended thinking)
+Generator A  — Reasoning (model_reasoning + extended thinking)
   ├── S₁ schema, temp=0.0  → candidate A1
   ├── S₁ schema, temp=0.7  → candidate A2
   ├── S₂ schema, temp=0.0  → candidate A3
   └── S₂ schema, temp=0.7  → candidate A4
 
-Generator B1 — Standard (claude-haiku-4-5-20251001, standard prompt)
+Generator B1 — Standard (model_fast, standard prompt)
   ├── S₁ schema            → candidate B1a
   └── S₂ schema            → candidate B1b
 
-Generator B2 — Complex SQL (claude-sonnet-4-6, complex-emphasis prompt)
+Generator B2 — Complex SQL (model_powerful, complex-emphasis prompt)
   ├── S₁ schema            → candidate B2a
   └── S₂ schema            → candidate B2b
 
-Generator C  — ICL (claude-sonnet-4-6, few-shot)
+Generator C  — ICL (model_powerful, few-shot)
   ├── Direct prompting     → candidate C1
   ├── Chain-of-thought     → candidate C2
   └── (optional) Step-back → candidate C3
@@ -200,20 +203,40 @@ BIRD_DATA_DIR=./data/bird
 PREPROCESSED_DIR=./data/preprocessed
 CACHE_DIR=./data/cache
 LOG_LEVEL=INFO
+
+# LLM Provider: "anthropic" (default) or "gemini"
+LLM_PROVIDER=anthropic
+GEMINI_API_KEY=your_gemini_key_here
+
+# Optional model tier overrides (leave blank to use provider defaults)
+# Anthropic defaults: model_fast=claude-haiku-4-5-20251001, model_powerful=claude-sonnet-4-6
+# Gemini defaults:    model_fast=gemini-2.5-flash,           model_powerful=gemini-2.5-pro
+# MODEL_FAST=
+# MODEL_POWERFUL=
+# MODEL_REASONING=
 ```
 
 Create `src/config/settings.py`:
 ```python
+from typing import Literal
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
-from pydantic import Field
 
 class Settings(BaseSettings):
-    # API
-    anthropic_api_key: str
+    # Provider selection
+    llm_provider: Literal["anthropic", "gemini"] = "anthropic"
 
-    # Models (by tier)
-    model_haiku: str = "claude-haiku-4-5-20251001"
-    model_sonnet: str = "claude-sonnet-4-6"
+    # API keys
+    anthropic_api_key: str = ""
+    gemini_api_key: str = ""
+
+    # Model tiers — leave as "" to use provider defaults (filled by validator)
+    # model_fast:      lightweight tasks (summarization, keyword extraction, fixing, selection, B1)
+    # model_powerful:  complex reasoning (schema linking, B2, Generator C ICL)
+    # model_reasoning: extended thinking (Generator A only)
+    model_fast: str = ""
+    model_powerful: str = ""
+    model_reasoning: str = ""
 
     # Paths
     bird_data_dir: str = "./data/bird"
@@ -232,11 +255,29 @@ class Settings(BaseSettings):
     # Selection
     fast_path_threshold: int = 1   # Number of clusters for fast path
 
-    class Config:
-        env_file = ".env"
+    @model_validator(mode="after")
+    def _apply_model_defaults(self) -> "Settings":
+        _DEFAULTS = {
+            "anthropic": {"model_fast": "claude-haiku-4-5-20251001",
+                          "model_powerful": "claude-sonnet-4-6",
+                          "model_reasoning": "claude-sonnet-4-6"},
+            "gemini":    {"model_fast": "gemini-2.5-flash",
+                          "model_powerful": "gemini-2.5-pro",
+                          "model_reasoning": "gemini-2.5-flash"},
+        }
+        for field, default in _DEFAULTS[self.llm_provider].items():
+            if not getattr(self, field):
+                setattr(self, field, default)
+        return self
+
+    model_config = {"env_file": ".env", "populate_by_name": True}
 
 settings = Settings()
 ```
+
+All LLM calls go through `src/llm/get_client().generate(...)` — see `src/llm/` for the
+provider abstraction. Use `settings.model_fast`, `settings.model_powerful`, or
+`settings.model_reasoning` as the `model` argument.
 
 ---
 
@@ -467,7 +508,7 @@ class DatabaseSummary:
 
 **File:** `tests/unit/test_summarizer.py`
 
-**Test setup:** Mock the Anthropic client to return pre-defined tool-use responses. Use `pytest-mock`'s `mocker.patch` on `anthropic.Anthropic`.
+**Test setup:** Mock `get_client` in the summarizer module to return an `AsyncMock` LLM client. Use `pytest-mock`'s `mocker.patch("src.preprocessing.summarizer.get_client", return_value=mock_client)` where `mock_client.generate.return_value = LLMResponse(tool_inputs=[{...}])`. All test methods calling `summarize_database` must be `async def` (handled automatically by `asyncio_mode = "auto"`).
 
 **Tests to write:**
 

@@ -22,26 +22,35 @@ Target: ≥68% Execution Accuracy on the BIRD dev set (1,534 questions).
 - Op 8: Query fixer (execute → fix errors/empty results, β=2 iterations)
 - Op 9: Adaptive selection (fast path if unanimous; otherwise pairwise tournament)
 
-## Claude Model Assignment
-| Task | Model |
-|------|-------|
-| Keyword extraction, query fixing, pairwise selection, field summarization | `claude-haiku-4-5-20251001` |
-| Schema linking, Generator B2 (complex SQL), Generator C (ICL), Generator B1 standard | `claude-sonnet-4-6` |
-| Generator A (reasoning) | `claude-sonnet-4-6` + extended thinking |
+## Model Tier Assignment
+
+Provider is selected via `LLM_PROVIDER` env var (`"anthropic"` or `"gemini"`).
+Override individual tiers with `MODEL_FAST`, `MODEL_POWERFUL`, `MODEL_REASONING` env vars
+(leave blank to use the provider defaults shown below).
+
+| Task | Tier | Anthropic default | Gemini default |
+|------|------|-------------------|----------------|
+| Field summarization, keyword extraction, query fixing, pairwise selection, Generator B1 | `model_fast` | `claude-haiku-4-5-20251001` | `gemini-2.5-flash` |
+| Schema linking, Generator B2 (complex SQL), Generator C (ICL) | `model_powerful` | `claude-sonnet-4-6` | `gemini-2.5-pro` |
+| Generator A (reasoning + extended thinking / thinking mode) | `model_reasoning` | `claude-sonnet-4-6` | `gemini-2.5-flash` |
 
 ## Code Conventions
 - Python 3.11+, async/await throughout (asyncio)
 - Pydantic v2 for all data models and settings
 - `pydantic-settings` for config (reads from `.env`)
-- All LLM calls use `anthropic` SDK with `tenacity` retry (exponential backoff)
+- All LLM calls go through `src/llm/` abstraction: `get_client().generate(...)` (async)
+- `tenacity` retry (3 attempts, exponential 2–30s) is inside each provider client — callers do not retry
 - Tool-use (JSON schema) for ALL structured LLM outputs — never free-text parsing
-- Prompt caching (`cache_control: {"type": "ephemeral"}`) on schema/example blocks
+- `CacheableText(cache=True)` marks system blocks for prompt caching (applied by Anthropic client via `cache_control: ephemeral`; no-op for Gemini)
 - Disk cache for LLM responses (keyed by SHA256 of model+prompt), toggled via `CACHE_LLM_RESPONSES`
 - Tests: pytest + pytest-asyncio + pytest-mock; mark live API tests with `@pytest.mark.live`
+- Mock LLM calls by patching `get_client` and returning an `AsyncMock` that returns `LLMResponse` objects
 
 ## Project Structure (src/)
 ```
 config/settings.py        data/bird_loader.py       data/database.py
+llm/__init__.py           llm/base.py
+llm/anthropic_client.py   llm/gemini_client.py
 preprocessing/profiler.py preprocessing/summarizer.py preprocessing/schema_formatter.py
 indexing/lsh_index.py     indexing/faiss_index.py   indexing/example_store.py
 grounding/context_grounder.py
@@ -57,10 +66,10 @@ evaluation/evaluator.py  evaluation/metrics.py
 
 ## Generator Configuration (Phase 1)
 ```
-Generator A  (Reasoning, Sonnet + extended thinking): 4 candidates (S₁×2 prompts + S₂×2 prompts)
-Generator B1 (Standard, Haiku):                       2 candidates (S₁, S₂)
-Generator B2 (Complex SQL, Sonnet):                   2 candidates (S₁, S₂)
-Generator C  (ICL, Sonnet + few-shot):                2–3 candidates (direct, CoT, step-back)
+Generator A  (Reasoning, model_reasoning + extended thinking): 4 candidates (S₁×2 prompts + S₂×2 prompts)
+Generator B1 (Standard, model_fast):                           2 candidates (S₁, S₂)
+Generator B2 (Complex SQL, model_powerful):                    2 candidates (S₁, S₂)
+Generator C  (ICL, model_powerful + few-shot):                 2–3 candidates (direct, CoT, step-back)
 Total: 10–11 candidates
 ```
 
@@ -77,6 +86,10 @@ Total: 10–11 candidates
 - BIRD train: ~9,428 questions, 84 databases (in `data/bird/train/`) — used for example store only
 - BIRD mini-dev: 500 questions (in `data/bird/mini_dev/`) — used for smoke tests
 - Metric: Execution Accuracy (EX) — compare result sets after sorting and type normalization
+
+## Implementation Progress
+Phase 1 is in progress. See `implementation_progress.json` for current step and per-step notes.
+To resume in a new session: say **"continue implementation"** — the progress file contains full state.
 
 ## What to Update Here
 After each implementation prompt, update this file with:
