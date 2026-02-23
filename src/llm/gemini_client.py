@@ -12,8 +12,10 @@ Features:
   the model or content doesn't meet the threshold).
 """
 
+import asyncio
 import hashlib
 import logging
+import os
 from typing import Any, Optional
 
 from tenacity import (
@@ -42,6 +44,9 @@ class GeminiClient(LLMClient):
             ) from exc
         # Maps SHA256(model:cacheable_text) → Gemini cache name
         self._cache_store: dict[str, str] = {}
+        # Lazy-initialized semaphore limiting concurrent calls (prevents rate limit errors)
+        self._semaphore: Optional[asyncio.Semaphore] = None
+        self._max_concurrent = int(os.environ.get("GEMINI_MAX_CONCURRENT", "5"))
 
     async def generate(
         self,
@@ -60,12 +65,17 @@ class GeminiClient(LLMClient):
         tool_defs = [_to_gemini_tool(t) for t in tools]
         contents = _to_gemini_contents(messages, types)
 
-        tool_config = types.ToolConfig(
-            function_calling_config=types.FunctionCallingConfig(
-                mode="ANY",
-                allowed_function_names=[tool_choice_name] if tool_choice_name else None,
+        # Only build tool_config when there are actual function declarations;
+        # Gemini API rejects ToolConfig with mode=ANY and empty function_declarations.
+        if tool_defs:
+            tool_config = types.ToolConfig(
+                function_calling_config=types.FunctionCallingConfig(
+                    mode="ANY",
+                    allowed_function_names=[tool_choice_name] if tool_choice_name else None,
+                )
             )
-        )
+        else:
+            tool_config = None
 
         # --- Context caching logic ---
         cacheable_blocks = [b for b in system if b.cache]
@@ -84,6 +94,14 @@ class GeminiClient(LLMClient):
                 if cache_name is not None:
                     self._cache_store[cache_key] = cache_name
 
+        # --- Build tool/tool_config kwargs (omit entirely when no tools) ---
+        tool_kwargs: dict = {
+            "automatic_function_calling": types.AutomaticFunctionCallingConfig(disable=True),
+        }
+        if tool_defs:
+            tool_kwargs["tools"] = [types.Tool(function_declarations=tool_defs)]
+            tool_kwargs["tool_config"] = tool_config
+
         # --- Build GenerateContentConfig ---
         if cache_name is not None:
             # Cached content already contains the cacheable system text
@@ -92,32 +110,26 @@ class GeminiClient(LLMClient):
                 gen_config = types.GenerateContentConfig(
                     system_instruction=non_cacheable_text,
                     cached_content=cache_name,
-                    tools=[types.Tool(function_declarations=tool_defs)],
-                    tool_config=tool_config,
                     max_output_tokens=max_tokens,
                     temperature=temperature,
-                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                    **tool_kwargs,
                 )
             else:
                 # No non-cacheable blocks — omit system_instruction entirely
                 gen_config = types.GenerateContentConfig(
                     cached_content=cache_name,
-                    tools=[types.Tool(function_declarations=tool_defs)],
-                    tool_config=tool_config,
                     max_output_tokens=max_tokens,
                     temperature=temperature,
-                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                    **tool_kwargs,
                 )
         else:
             # Fall back to current behavior: combine all system blocks
             system_instruction = "\n\n".join(b.text for b in system)
             gen_config = types.GenerateContentConfig(
                 system_instruction=system_instruction,
-                tools=[types.Tool(function_declarations=tool_defs)],
-                tool_config=tool_config,
                 max_output_tokens=max_tokens,
                 temperature=temperature,
-                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                **tool_kwargs,
             )
 
         if thinking and thinking.enabled:
@@ -127,12 +139,35 @@ class GeminiClient(LLMClient):
             )
 
         try:
-            raw = await self._call_with_retry(model=model, contents=contents, config=gen_config)
-            return _parse_response(raw)
+            async with self._get_semaphore():
+                raw = await self._call_with_retry(model=model, contents=contents, config=gen_config)
+            parsed = _parse_response(raw)
+
+            # One-shot retry with doubled token budget when the model was truncated before
+            # producing any output (finish_reason=MAX_TOKENS, no text, no tool calls).
+            if parsed.text is None and not parsed.tool_inputs and "MAX_TOKENS" in str(parsed.finish_reason):
+                retry_max = min(max_tokens * 2, 8192)
+                logger.warning(
+                    "MAX_TOKENS hit with no output (max_tokens=%d); retrying with max_tokens=%d",
+                    max_tokens,
+                    retry_max,
+                )
+                gen_config.max_output_tokens = retry_max
+                async with self._get_semaphore():
+                    raw = await self._call_with_retry(model=model, contents=contents, config=gen_config)
+                parsed = _parse_response(raw)
+
+            return parsed
         except LLMError:
             raise
         except Exception as exc:
             raise LLMError(f"Gemini API call failed after retries: {exc}") from exc
+
+    def _get_semaphore(self) -> asyncio.Semaphore:
+        """Lazily create the concurrency semaphore (must be called from async context)."""
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(self._max_concurrent)
+        return self._semaphore
 
     async def _try_create_cache(self, model: str, system_text: str) -> Optional[str]:
         """Try to create a Gemini context cache. Returns cache name on success, None on failure."""
@@ -217,6 +252,8 @@ def _parse_response(raw: Any) -> LLMResponse:
             f"Gemini candidate has no content (finish_reason={finish_reason})"
         )
 
+    finish_reason = str(getattr(candidate, "finish_reason", "UNKNOWN"))
+
     for part in (candidate.content.parts or []):
         if hasattr(part, "function_call") and part.function_call:
             # function_call.args is a MapComposite; convert to plain dict
@@ -226,10 +263,25 @@ def _parse_response(raw: Any) -> LLMResponse:
         elif part.text:
             text_parts.append(part.text)
 
+    if not text_parts and not tool_inputs:
+        safety_ratings = getattr(candidate, "safety_ratings", None)
+        parts_summary = [
+            (getattr(p, "thought", False), bool(getattr(p, "text", None)))
+            for p in (candidate.content.parts or [])
+        ]
+        logger.warning(
+            "Gemini response has no text or tool output: "
+            "finish_reason=%s, safety_ratings=%s, parts(thought,has_text)=%s",
+            finish_reason,
+            safety_ratings,
+            parts_summary,
+        )
+
     return LLMResponse(
         tool_inputs=tool_inputs,
         text="\n".join(text_parts) or None,
         thinking=thinking_text,
         input_tokens=getattr(raw.usage_metadata, "prompt_token_count", 0) or 0,
         output_tokens=getattr(raw.usage_metadata, "candidates_token_count", 0) or 0,
+        finish_reason=finish_reason,
     )

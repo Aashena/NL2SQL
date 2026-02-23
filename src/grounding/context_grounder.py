@@ -15,7 +15,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
-from src.llm import get_client, CacheableText, ToolParam
+from src.llm import get_client, CacheableText, ToolParam, LLMError
 from src.config.settings import settings
 
 if TYPE_CHECKING:
@@ -112,21 +112,32 @@ async def ground_context(
     client = get_client()
     user_message = f"Question: {question}\nEvidence: {evidence_str}"
 
-    response = await client.generate(
-        model=settings.model_fast,
-        system=[CacheableText(text=_SYSTEM_PROMPT, cache=True)],
-        messages=[{"role": "user", "content": user_message}],
-        tools=[_EXTRACT_GROUNDING_TOOL],
-        tool_choice_name="extract_grounding",
-        max_tokens=512,
-        temperature=0.0,
-    )
-
-    if response.tool_inputs:
-        tool_output = response.tool_inputs[0]
-        literals: list[str] = tool_output.get("literals", [])
-        schema_references: list[str] = tool_output.get("schema_references", [])
-    else:
+    try:
+        response = await client.generate(
+            model=settings.model_fast,
+            system=[CacheableText(text=_SYSTEM_PROMPT, cache=True)],
+            messages=[{"role": "user", "content": user_message}],
+            tools=[_EXTRACT_GROUNDING_TOOL],
+            tool_choice_name="extract_grounding",
+            max_tokens=512,
+            temperature=0.0,
+        )
+        if response.tool_inputs:
+            tool_output = response.tool_inputs[0]
+            literals: list[str] = tool_output.get("literals", [])
+            schema_references: list[str] = tool_output.get("schema_references", [])
+        else:
+            literals = []
+            schema_references = []
+    except LLMError as exc:
+        # Gemini occasionally returns MALFORMED_FUNCTION_CALL for complex inputs
+        # (e.g. dates with forward slashes, special characters). Fall back to
+        # empty grounding rather than crashing the entire question pipeline.
+        logger.warning(
+            "Grounding LLM error for question %r — falling back to empty grounding: %s",
+            question[:60],
+            exc,
+        )
         literals = []
         schema_references = []
 

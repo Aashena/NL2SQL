@@ -29,8 +29,10 @@ def clean_sql(raw: str) -> str:
     """Extract SQL from markdown code fences; strip semicolons; normalize whitespace.
 
     Handles:
-    - ```sql ... ``` fences
+    - ```sql ... ``` fences (any language tag: sql, SQL, sqlite, etc.)
     - ``` ... ``` fences (no language tag)
+    - Orphan opening fence with no closing ``` (model truncation)
+    - Inline single-backtick: `SELECT ...`
     - Trailing semicolons
     - Runs of whitespace collapsed to a single space
     """
@@ -39,20 +41,30 @@ def clean_sql(raw: str) -> str:
 
     text = raw.strip()
 
-    # Strip markdown code fences — e.g. ```sql\n...\n``` or ```\n...\n```
-    # Pattern: optional ```<lang>\n ... \n``` with possible leading/trailing whitespace
+    # Strategy 1 (full fence): match any opening ```<lang> ... ``` pair.
+    # Accepts any alphanumeric language tag (sql, SQL, sqlite, SQL WITH, etc.)
+    # or no tag at all.  Uses DOTALL so newlines inside the fence are captured.
     fence_match = re.search(
-        r"```(?:sql|SQL)?\s*\n?(.*?)```",
+        r"```[a-zA-Z0-9]*\s*\r?\n?(.*?)```",
         text,
-        flags=re.DOTALL,
+        flags=re.DOTALL | re.IGNORECASE,
     )
     if fence_match:
         text = fence_match.group(1).strip()
     else:
-        # Also handle inline fences without newlines: `SELECT ...`
-        inline_match = re.match(r"^`([^`]+)`$", text, flags=re.DOTALL)
-        if inline_match:
-            text = inline_match.group(1).strip()
+        # Strategy 2 (orphan opening fence): the model stopped generating before
+        # emitting the closing ```.  Strip the opening fence and any stray trailing
+        # ``` that might appear at the very end of the string.
+        orphan_match = re.match(r"^```[a-zA-Z0-9]*\s*\r?\n?", text, flags=re.IGNORECASE)
+        if orphan_match:
+            text = text[orphan_match.end():]
+            # Also strip a trailing ``` if present (safety measure)
+            text = re.sub(r"```\s*$", "", text).strip()
+        else:
+            # Strategy 3 (inline single-backtick): `SELECT ...`
+            inline_match = re.match(r"^`([^`]+)`$", text, flags=re.DOTALL)
+            if inline_match:
+                text = inline_match.group(1).strip()
 
     # Remove trailing semicolons (possibly surrounded by whitespace)
     text = text.rstrip("; \t\n\r")
@@ -89,16 +101,24 @@ def build_base_prompt(question: str, evidence: str, cell_matches: list) -> str:
 
     Format:
         Question: {question}
-        Evidence: {evidence}
+
+        ## Evidence (use for thresholds and domain values)
+        {evidence}
 
         Relevant cell values from the database:
         - {table}.{column} = '{value}'   (for each cell match)
 
         Write a SQL query that answers the question.
+
+    Evidence is placed in a prominent labeled section so the model treats it as
+    an authoritative constraint (e.g. threshold values, domain definitions) rather
+    than supplementary text.
     """
     lines: list[str] = []
     lines.append(f"Question: {question}")
-    lines.append(f"Evidence: {evidence if evidence else 'None'}")
+    lines.append("")
+    lines.append("## Evidence (use for thresholds and domain values)")
+    lines.append(evidence if evidence else "None")
     lines.append("")
 
     if cell_matches:

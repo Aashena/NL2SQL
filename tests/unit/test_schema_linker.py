@@ -414,13 +414,16 @@ async def test_s1_smaller_than_s2(mock_faiss_index, mock_grounding_context):
 
 @pytest.mark.asyncio
 async def test_faiss_pre_filtering_top_k(mock_faiss_index, mock_grounding_context):
-    """FAISSIndex.query should be called with top_k = settings.faiss_top_k."""
+    """FAISSIndex.query first call uses top_k = settings.faiss_top_k (question pre-filter).
+    Additional calls use top_k=3 for schema-hint auto-promotion (one per hint)."""
     from src.config.settings import settings
+    from unittest.mock import call
 
+    question = "What is the average GPA?"
     with patch("src.schema_linking.schema_linker.get_client") as mock_get_client:
         mock_get_client.return_value = make_mock_client()
         await link_schema(
-            question="What is the average GPA?",
+            question=question,
             evidence="",
             grounding_context=mock_grounding_context,
             faiss_index=mock_faiss_index,
@@ -429,9 +432,23 @@ async def test_faiss_pre_filtering_top_k(mock_faiss_index, mock_grounding_contex
             available_fields=AVAILABLE_FIELDS,
         )
 
-    mock_faiss_index.query.assert_called_once_with(
-        "What is the average GPA?", top_k=settings.faiss_top_k
+    # First call: pre-filter on the question with configured top_k
+    first_call = mock_faiss_index.query.call_args_list[0]
+    assert first_call == call(question, top_k=settings.faiss_top_k), (
+        f"First FAISS query call should use the question and top_k={settings.faiss_top_k}"
     )
+
+    # Subsequent calls: one per schema_hint, each with top_k=3
+    hint_calls = mock_faiss_index.query.call_args_list[1:]
+    assert len(hint_calls) == len(mock_grounding_context.schema_hints), (
+        f"Expected one FAISS query call per schema_hint "
+        f"({len(mock_grounding_context.schema_hints)} hints), "
+        f"got {len(hint_calls)} extra calls"
+    )
+    for hcall, hint in zip(hint_calls, mock_grounding_context.schema_hints):
+        assert hcall == call(hint, top_k=3), (
+            f"Hint FAISS query call should be call({hint!r}, top_k=3), got {hcall}"
+        )
 
 
 # ---------------------------------------------------------------------------

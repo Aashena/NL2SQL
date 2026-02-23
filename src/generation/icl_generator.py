@@ -143,7 +143,7 @@ class ICLGenerator:
                 tools=[],
                 tool_choice_name=None,
                 thinking=None,
-                max_tokens=2000,
+                max_tokens=4096,  # increased from 2000: gemini-2.5-pro needs headroom for implicit reasoning
             )
         except Exception as exc:
             logger.error("ICLGenerator %s failed: %s", candidate_id, exc)

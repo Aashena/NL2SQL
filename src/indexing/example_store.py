@@ -33,10 +33,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Lazy cache for spaCy and embedding models
+# Reuse the shared SentenceTransformer instance from faiss_index so the model
+# is only loaded once per process (not once per module).
+from src.indexing.faiss_index import _embed  # noqa: E402
+
+# Lazy cache for spaCy model only
 _SPACY_MODEL = None
-_EMBEDDING_MODEL = None
-_EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 
 
 def _get_spacy_model():
@@ -53,27 +55,6 @@ def _get_spacy_model():
                 "Run: python -m spacy download en_core_web_sm"
             ) from e
     return _SPACY_MODEL
-
-
-def _get_embedding_model():
-    """Lazily load the SentenceTransformer model."""
-    global _EMBEDDING_MODEL
-    if _EMBEDDING_MODEL is None:
-        from sentence_transformers import SentenceTransformer
-        _EMBEDDING_MODEL = SentenceTransformer(_EMBEDDING_MODEL_NAME)
-        logger.info("Loaded SentenceTransformer model: %s", _EMBEDDING_MODEL_NAME)
-    return _EMBEDDING_MODEL
-
-
-def _embed(texts: list[str]) -> np.ndarray:
-    """Embed a list of texts and L2-normalize. Returns float32 array."""
-    model = _get_embedding_model()
-    embeddings = model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
-    embeddings = embeddings.astype(np.float32)
-    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-    norms = np.where(norms == 0, 1.0, norms)
-    embeddings = embeddings / norms
-    return embeddings
 
 
 # Regex patterns for skeleton masking

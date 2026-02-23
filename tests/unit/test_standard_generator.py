@@ -368,7 +368,98 @@ async def test_b2_system_prompt_mentions_cte(schemas, grounding):
 
 
 # ---------------------------------------------------------------------------
-# Test 10: Parallel generation (all 4 calls complete)
+# Test 10: S1==S2 — alternative prompts used for s2 variants
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def schemas_s1_eq_s2():
+    """LinkedSchemas where S1 and S2 cover the same fields (no recall expansion)."""
+    md = (
+        "## Table: students\n"
+        "| Column | Type | Description |\n"
+        "|--------|------|-------------|\n"
+        "| id | INTEGER (PK) | student id |\n"
+        "| gpa | REAL | grade point average |"
+    )
+    fields = [("students", "id"), ("students", "gpa")]
+    return LinkedSchemas(
+        s1_fields=fields,
+        s2_fields=fields,          # identical — triggers the alt-prompt branch
+        s1_ddl="CREATE TABLE students (id INTEGER PRIMARY KEY, gpa REAL);",
+        s2_ddl="CREATE TABLE students (id INTEGER PRIMARY KEY, gpa REAL);",
+        s1_markdown=md,
+        s2_markdown=md,
+        selection_reasoning="",
+    )
+
+
+@pytest.mark.asyncio
+async def test_s1_eq_s2_uses_alternative_prompts(schemas_s1_eq_s2, grounding):
+    """When S1==S2, the s2 variants receive 'alternative' system prompts."""
+    mock_client = make_mock_client()
+
+    with patch("src.generation.standard_generator.get_client", return_value=mock_client):
+        gen = StandardAndComplexGenerator()
+        candidates = await gen.generate(
+            question="List all students with GPA above 3.5",
+            evidence="",
+            schemas=schemas_s1_eq_s2,
+            grounding=grounding,
+        )
+
+    assert len(candidates) == 4
+
+    call_args_list = mock_client.generate.call_args_list
+    assert len(call_args_list) == 4
+
+    # Call order: B1_s1, B1_s2, B2_s1, B2_s2
+    for idx in (0, 2):  # s1 calls
+        system_text = " ".join(
+            block.text for block in call_args_list[idx].kwargs["system"]
+        ).lower()
+        assert "alternative" not in system_text, (
+            f"Call {idx} (s1 variant) should NOT use alternative prompt; "
+            f"got: {system_text[:200]!r}"
+        )
+
+    for idx in (1, 3):  # s2 calls — must use alternative templates
+        system_text = " ".join(
+            block.text for block in call_args_list[idx].kwargs["system"]
+        ).lower()
+        assert "alternative" in system_text, (
+            f"Call {idx} (s2 variant with S1==S2) should use alternative prompt; "
+            f"got: {system_text[:200]!r}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_s1_neq_s2_uses_standard_prompts(schemas, grounding):
+    """When S1!=S2, the s2 variants receive the standard (non-alternative) prompts."""
+    mock_client = make_mock_client()
+
+    with patch("src.generation.standard_generator.get_client", return_value=mock_client):
+        gen = StandardAndComplexGenerator()
+        await gen.generate(
+            question="List all students with GPA above 3.5",
+            evidence="",
+            schemas=schemas,       # existing fixture: S1 != S2
+            grounding=grounding,
+        )
+
+    call_args_list = mock_client.generate.call_args_list
+
+    for idx in (1, 3):  # s2 calls — must NOT use alternative templates
+        system_text = " ".join(
+            block.text for block in call_args_list[idx].kwargs["system"]
+        ).lower()
+        assert "alternative" not in system_text, (
+            f"Call {idx} (s2 variant with S1!=S2) should NOT use alternative prompt; "
+            f"got: {system_text[:200]!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test 13: Parallel generation (all 4 calls complete)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio

@@ -20,7 +20,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
-from src.llm import get_client, CacheableText, ToolParam
+from src.llm import get_client, CacheableText, LLMError, ToolParam
 from src.config.settings import settings
 
 if TYPE_CHECKING:
@@ -35,7 +35,13 @@ logger = logging.getLogger(__name__)
 
 _SELECT_COLUMNS_TOOL = ToolParam(
     name="select_columns",
-    description="Select database columns needed to answer the SQL question",
+    description=(
+        "Select database columns needed to answer the SQL question. "
+        "For each selected field use the exact table name and column name as listed "
+        "in the candidate fields (e.g. table='schools', column='Enrollment (K-12)'). "
+        "The 'column' value must be the column name only — never include the table name "
+        "again inside 'column' (e.g. use column='year', not column='seasons.year')."
+    ),
     input_schema={
         "type": "object",
         "properties": {
@@ -498,9 +504,11 @@ async def link_schema(
         cache=False,
     )
 
-    # Build candidate field list for system block 2 (cacheable)
+    # Build candidate field list for system block 2 (cacheable).
+    # Format uses pipe separators so special characters in column names
+    # (parentheses, slashes, etc.) don't confuse Gemini's function-call parser.
     candidate_lines = [
-        f"{t}.{c}: {ss}" for t, c, ss, _ls in candidates
+        f"Table: {t} | Column: {c} | {ss}" for t, c, ss, _ls in candidates
     ]
     system_block_2 = CacheableText(
         text="Candidate fields:\n" + "\n".join(candidate_lines),
@@ -518,20 +526,25 @@ async def link_schema(
     )
 
     client = get_client()
-    response_s1 = await client.generate(
-        model=settings.model_powerful,
-        system=[system_block_1, system_block_2],
-        messages=[{"role": "user", "content": user_msg_s1}],
-        tools=[_SELECT_COLUMNS_TOOL],
-        tool_choice_name="select_columns",
-        max_tokens=2000,
-        temperature=0.0,
-    )
-
-    # Parse S₁ fields
-    s1_raw: list[dict] = []
-    if response_s1.tool_inputs:
-        s1_raw = response_s1.tool_inputs[0].get("selected_fields", [])
+    try:
+        response_s1 = await client.generate(
+            model=settings.model_powerful,
+            system=[system_block_1, system_block_2],
+            messages=[{"role": "user", "content": user_msg_s1}],
+            tools=[_SELECT_COLUMNS_TOOL],
+            tool_choice_name="select_columns",
+            max_tokens=2000,
+            temperature=0.0,
+        )
+        s1_raw: list[dict] = response_s1.tool_inputs[0].get("selected_fields", []) if response_s1.tool_inputs else []
+    except LLMError as exc:
+        logger.error(
+            "Schema linker S1 LLM call failed (%s); falling back to FAISS top-15 as S1.", exc
+        )
+        s1_raw = [
+            {"table": t, "column": c, "reason": "FAISS-rank-fallback"}
+            for t, c, _ss, _ls in candidates[:15]
+        ]
 
     s1_reasons: list[str] = []
     s1_selected: set[tuple[str, str]] = set()
@@ -579,6 +592,26 @@ async def link_schema(
     s1_extended = _add_pk_fk_for_tables(s1_selected, s1_tables)
 
     # ------------------------------------------------------------------
+    # Auto-promote high-confidence FAISS matches from schema_hints to S1
+    # ------------------------------------------------------------------
+    # If a schema hint (field name reference from grounding context) has
+    # cosine similarity >= 0.8 to a field in the FAISS index, include it
+    # in S1 directly — the LLM may not select it if the candidate list
+    # is large or if the column name is ambiguous.
+    _HIGH_CONF_S1_THRESHOLD = 0.8
+    for hint in grounding_context.schema_hints:
+        hint_results = faiss_index.query(hint, top_k=3)
+        for fm in hint_results:
+            if fm.similarity_score >= _HIGH_CONF_S1_THRESHOLD:
+                key = (fm.table, fm.column)
+                if key in available_field_set and key not in s1_extended:
+                    logger.debug(
+                        "Auto-promoting high-confidence hint to S1: %s.%s (score=%.2f, hint=%r)",
+                        fm.table, fm.column, fm.similarity_score, hint,
+                    )
+                    s1_extended.add(key)
+
+    # ------------------------------------------------------------------
     # Step 6.3 — Iteration 2: Recall Expansion (S₂)
     # ------------------------------------------------------------------
     # Show remaining candidates (not already in S₁ extended)
@@ -589,7 +622,7 @@ async def link_schema(
 
     if remaining_candidates:
         remaining_lines = [
-            f"{t}.{c}: {ss}" for t, c, ss, _ls in remaining_candidates
+            f"Table: {t} | Column: {c} | {ss}" for t, c, ss, _ls in remaining_candidates
         ]
         system_block_2_remaining = CacheableText(
             text="Candidate fields:\n" + "\n".join(remaining_lines),
@@ -604,19 +637,22 @@ async def link_schema(
             "(cast a wider net — include columns that could be relevant)."
         )
 
-        response_s2 = await client.generate(
-            model=settings.model_powerful,
-            system=[system_block_1, system_block_2_remaining],
-            messages=[{"role": "user", "content": user_msg_s2}],
-            tools=[_SELECT_COLUMNS_TOOL],
-            tool_choice_name="select_columns",
-            max_tokens=2000,
-            temperature=0.0,
-        )
-
-        s2_raw: list[dict] = []
-        if response_s2.tool_inputs:
-            s2_raw = response_s2.tool_inputs[0].get("selected_fields", [])
+        try:
+            response_s2 = await client.generate(
+                model=settings.model_powerful,
+                system=[system_block_1, system_block_2_remaining],
+                messages=[{"role": "user", "content": user_msg_s2}],
+                tools=[_SELECT_COLUMNS_TOOL],
+                tool_choice_name="select_columns",
+                max_tokens=2000,
+                temperature=0.0,
+            )
+            s2_raw: list[dict] = response_s2.tool_inputs[0].get("selected_fields", []) if response_s2.tool_inputs else []
+        except LLMError as exc:
+            logger.error(
+                "Schema linker S2 LLM call failed (%s); using S1 as S2 fallback.", exc
+            )
+            s2_raw = []
 
         s2_new: set[tuple[str, str]] = set()
         for item in s2_raw:
@@ -651,20 +687,49 @@ async def link_schema(
             "No additional candidate fields available. "
             "Return an empty selected_fields list."
         )
-        _response_s2_empty = await client.generate(
-            model=settings.model_powerful,
-            system=[system_block_1, system_block_2_empty],
-            messages=[{"role": "user", "content": user_msg_s2_empty}],
-            tools=[_SELECT_COLUMNS_TOOL],
-            tool_choice_name="select_columns",
-            max_tokens=200,
-            temperature=0.0,
-        )
+        try:
+            _response_s2_empty = await client.generate(
+                model=settings.model_powerful,
+                system=[system_block_1, system_block_2_empty],
+                messages=[{"role": "user", "content": user_msg_s2_empty}],
+                tools=[_SELECT_COLUMNS_TOOL],
+                tool_choice_name="select_columns",
+                max_tokens=200,
+                temperature=0.0,
+            )
+        except LLMError as exc:
+            logger.warning("Schema linker S2 (empty-candidates) call failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Enforce S₁ ⊆ S₂ invariant
     # ------------------------------------------------------------------
     s2_extended = s2_extended | s1_extended  # guarantee S₁ ⊆ S₂
+
+    # ------------------------------------------------------------------
+    # Cap S₂ to prevent over-expansion on large-schema databases.
+    # Formula: s2_cap = min(len(s1_extended) + 10, 25)
+    # S₁ fields are always preserved; excess recall fields are trimmed
+    # by FAISS rank (the order of the `candidates` list).
+    # ------------------------------------------------------------------
+    s2_cap = min(len(s1_extended) + 10, 25)
+    if len(s2_extended) > s2_cap:
+        s2_only = s2_extended - s1_extended
+        slots_available = max(s2_cap - len(s1_extended), 0)
+        # Prioritise by FAISS rank; unranked fields (e.g. PK/FK additions for
+        # S2-only tables) come last
+        candidate_keys = [(t, c) for t, c, _ss, _ls in candidates]
+        candidate_key_set = set(candidate_keys)
+        s2_only_ranked = [k for k in candidate_keys if k in s2_only]
+        s2_only_unranked = [k for k in s2_only if k not in candidate_key_set]
+        s2_trimmed = set((s2_only_ranked + s2_only_unranked)[:slots_available])
+        logger.debug(
+            "S₂ capped: %d → %d fields (s1=%d, cap=%d)",
+            len(s2_extended),
+            len(s1_extended) + len(s2_trimmed),
+            len(s1_extended),
+            s2_cap,
+        )
+        s2_extended = s1_extended | s2_trimmed
 
     # ------------------------------------------------------------------
     # Step 6.4 — Schema Rendering

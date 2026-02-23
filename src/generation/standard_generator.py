@@ -42,6 +42,28 @@ _B2_SYSTEM_TEMPLATE = (
     "{markdown_schema}"
 )
 
+# Alternative templates used when S₁ == S₂ (schema linker found no recall-only fields).
+# Instead of feeding the same schema twice and getting duplicate SQL, these templates
+# steer the model toward a structurally different solution approach.
+_B1_ALT_SYSTEM_TEMPLATE = (
+    "You are an expert SQL writer. Given a database schema and a question, write a correct SQL query.\n"
+    "Explore an alternative approach: consider a different JOIN order, use a subquery where you\n"
+    "would normally use a JOIN (or vice versa), or handle edge cases the straightforward solution\n"
+    "might miss (e.g. NULLs, ties, empty groups).\n\n"
+    "Database Schema:\n"
+    "{markdown_schema}"
+)
+
+_B2_ALT_SYSTEM_TEMPLATE = (
+    "You are an expert SQL writer specializing in advanced query patterns.\n"
+    "Write an alternative SQL solution using a different structural approach: if the obvious\n"
+    "solution uses a JOIN, try a correlated subquery or CTE instead; if it uses GROUP BY,\n"
+    "consider a window function. Also check for edge cases such as NULLs, duplicate rows,\n"
+    "or boundary conditions.\n\n"
+    "Database Schema:\n"
+    "{markdown_schema}"
+)
+
 
 class StandardAndComplexGenerator:
     """Generators B1 (standard) and B2 (complex SQL) — Markdown schemas, no extended thinking."""
@@ -56,8 +78,21 @@ class StandardAndComplexGenerator:
         """Generate 4 candidates concurrently (B1a, B1b, B2a, B2b)."""
         user_prompt = build_base_prompt(question, evidence, grounding.matched_cells)
 
+        # When the schema linker's recall expansion (S₂) adds no new fields, S₁ and S₂
+        # are identical. Feeding the same schema twice with the same prompt produces
+        # duplicate SQL and wastes API calls. Use alternative prompt templates for the
+        # s2 variants instead so the model explores a different structural approach.
+        s1_eq_s2 = set(schemas.s1_fields) == set(schemas.s2_fields)
+        if s1_eq_s2:
+            logger.debug(
+                "S1==S2 detected (%d fields); using alternative prompts for B1_s2 and B2_s2",
+                len(schemas.s1_fields),
+            )
+        b1_s2_template = _B1_ALT_SYSTEM_TEMPLATE if s1_eq_s2 else _B1_SYSTEM_TEMPLATE
+        b2_s2_template = _B2_ALT_SYSTEM_TEMPLATE if s1_eq_s2 else _B2_SYSTEM_TEMPLATE
+
         tasks = [
-            # B1: standard prompt, fast model
+            # B1: standard prompt, fast model — 2000 tokens is sufficient
             self._generate_one(
                 candidate_id="standard_B1_s1",
                 schema_used="s1",
@@ -65,16 +100,18 @@ class StandardAndComplexGenerator:
                 system_template=_B1_SYSTEM_TEMPLATE,
                 model=settings.model_fast,
                 user_prompt=user_prompt,
+                max_tokens=2000,
             ),
             self._generate_one(
                 candidate_id="standard_B1_s2",
                 schema_used="s2",
                 markdown_schema=schemas.s2_markdown,
-                system_template=_B1_SYSTEM_TEMPLATE,
+                system_template=b1_s2_template,
                 model=settings.model_fast,
                 user_prompt=user_prompt,
+                max_tokens=2000,
             ),
-            # B2: complex SQL prompt, powerful model
+            # B2: complex SQL prompt, powerful model — 4096 tokens to avoid MAX_TOKENS truncation
             self._generate_one(
                 candidate_id="complex_B2_s1",
                 schema_used="s1",
@@ -82,14 +119,16 @@ class StandardAndComplexGenerator:
                 system_template=_B2_SYSTEM_TEMPLATE,
                 model=settings.model_powerful,
                 user_prompt=user_prompt,
+                max_tokens=4096,
             ),
             self._generate_one(
                 candidate_id="complex_B2_s2",
                 schema_used="s2",
                 markdown_schema=schemas.s2_markdown,
-                system_template=_B2_SYSTEM_TEMPLATE,
+                system_template=b2_s2_template,
                 model=settings.model_powerful,
                 user_prompt=user_prompt,
+                max_tokens=4096,
             ),
         ]
 
@@ -104,6 +143,7 @@ class StandardAndComplexGenerator:
         system_template: str,
         model: str,
         user_prompt: str,
+        max_tokens: int = 2000,
     ) -> SQLCandidate:
         """Generate a single candidate using the given model and system template."""
         system_text = system_template.format(markdown_schema=markdown_schema)
@@ -118,7 +158,7 @@ class StandardAndComplexGenerator:
                 tools=[],
                 tool_choice_name=None,
                 thinking=None,
-                max_tokens=2000,
+                max_tokens=max_tokens,
             )
         except Exception as exc:
             logger.error(
