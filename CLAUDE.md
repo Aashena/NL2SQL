@@ -84,8 +84,20 @@ Total: 10–11 candidates
 ## Dataset
 - BIRD dev: 1,534 questions, 11 SQLite databases (in `data/bird/dev/`)
 - BIRD train: ~9,428 questions, 84 databases (in `data/bird/train/`) — used for example store only
-- BIRD mini-dev: 500 questions (in `data/bird/mini_dev/`) — used for smoke tests
+- BIRD mini-dev: 500 questions (in `data/bird/mini_dev/`)
 - Metric: Execution Accuracy (EX) — compare result sets after sorting and type normalization
+
+## Sampling Convention for Tests
+**NEVER use "first N questions"** — BIRD dev questions are ordered by database, so first-N always hits only one database.
+
+Always use **stratified random sampling** across all 11 databases, seeded with `random.seed(42)` for reproducibility:
+
+| Original test size | New size | Per-database breakdown |
+|-------------------|----------|------------------------|
+| ≤ 10 questions    | **33**   | 3 per DB: 1 simple, 1 moderate, 1 challenging |
+| 50 questions      | **66**   | 6 per DB: 2 simple, 2 moderate, 2 challenging |
+
+Report results broken down by both **difficulty** (simple / moderate / challenging) and **database**.
 
 ## Implementation Progress
 Phase 1 is in progress. See `implementation_progress.json` for current step and per-step notes.

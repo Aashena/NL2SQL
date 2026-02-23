@@ -354,15 +354,15 @@ All tests must pass. Report: results + flag anything about the ICL prompt format
 
 ---
 
-## ★ Refinement Checkpoint D — Test Full Generation on 10 Questions
+## ★ Refinement Checkpoint D — Test Full Generation on 33 Questions (3 per Database)
 
 ```
 All generators are built. Let's test them on real BIRD questions with the cache enabled.
 
-Run the pipeline through Op 7 (grounding → schema linking → all 3 generators) on the first 10 BIRD dev questions. For each question report:
+Run the pipeline through Op 7 (grounding → schema linking → all 3 generators) on 33 BIRD dev questions — 3 randomly selected per each of the 11 databases, where the 3 questions include 1 simple, 1 moderate, and 1 challenging question. For each question report:
 1. Which of the 10-11 candidates execute successfully (success rate per generator type)
 2. Do any candidates produce identical SQL? (measures real diversity)
-3. What is the "oracle upper bound" — does at least 1 candidate match the ground truth? (run this as the test_candidate_pool_upper_bound_estimation test with the 10 questions)
+3. What is the "oracle upper bound" — does at least 1 candidate match the ground truth? (run this as the test_candidate_pool_upper_bound_estimation test with the 33 questions)
 
 Then:
 4. Look at 2 questions where NO candidate matches ground truth. What went wrong? (Schema linking missed a column? Generators hallucinated values? Wrong join?)
@@ -398,7 +398,7 @@ Files to create:
 
 After implementing, run: pytest tests/unit/test_query_fixer.py -v
 
-All 12 tests must pass. Report: results + what fraction of typical candidate errors are syntax vs. schema vs. empty? (Estimate from the 10-question test in Checkpoint D if you have that data.)
+All 12 tests must pass. Report: results + what fraction of typical candidate errors are syntax vs. schema vs. empty? (Estimate from the 33-question test in Checkpoint D if you have that data.)
 ```
 
 ---
@@ -434,7 +434,7 @@ All 12 tests must pass. Report: results + specifically: does the result equivale
 ```
 All individual components are implemented. Before wiring them into the full pipeline, let's validate them together on real data.
 
-Run a manual end-to-end test on 5 BIRD dev questions by calling each component in sequence (not through the pipeline yet):
+Run a manual end-to-end test on 33 BIRD dev questions — 3 randomly selected per each of the 11 databases (random.seed(42)), where each group of 3 includes 1 simple, 1 moderate, and 1 challenging question. Call each component in sequence (not through the pipeline yet).
 
 For each question, show me a table:
 | Stage | Output Summary |
@@ -447,7 +447,7 @@ For each question, show me a table:
 | Correct? | Yes/No (compare to ground truth) |
 
 Based on this:
-1. What is the accuracy on these 5 questions?
+1. What is the accuracy on these 33 questions (broken down by difficulty and by database)?
 2. For any wrong answers: at what stage did it go wrong?
 3. Are there any component interfaces that feel awkward to wire together?
 4. Is there anything you'd change about the data flow before we write the pipeline?
@@ -521,7 +521,7 @@ Read CLAUDE.md. All components, pipeline, and evaluation are implemented and tes
 Implement the end-to-end test suite and run the BIRD evaluation.
 
 Files to create:
-1. `tests/e2e/test_bird_mini.py` — 5 tests from the E2E Smoke Test section of the implementation guide. Mark all with @pytest.mark.live. The test_pipeline_runs_50_questions test should run the first 50 questions from BIRD mini-dev and assert: no exceptions, all return non-empty SQL, EX >= 50%, no question > 60s.
+1. `tests/e2e/test_bird_mini.py` — 5 tests from the E2E Smoke Test section of the implementation guide. Mark all with @pytest.mark.live. The test_pipeline_runs_66_questions test should run 66 questions from the BIRD dev set — 6 randomly selected per each of the 11 databases (2 simple, 2 moderate, 2 challenging each, random.seed(42)) — and assert: no exceptions, all return non-empty SQL, EX >= 50%, no question > 60s.
 
 2. `tests/e2e/test_bird_full.py` — 10 tests from the E2E Full BIRD Dev Evaluation section. Mark all with @pytest.mark.live.
 
@@ -529,13 +529,13 @@ Then actually run the smoke test:
    pytest tests/e2e/test_bird_mini.py -v -m live --timeout=600
 
 Report the results including:
-- EX accuracy on 50 questions
+- EX accuracy on 66 questions (broken down by difficulty: simple / moderate / challenging, and by database)
 - Fast path rate
 - Which generator produced the most winning candidates
 - Average latency and cost per question
 - Any questions that caused errors or unexpected behavior
 
-Based on these 50-question results, propose what should be tuned/fixed before running the full 1534-question BIRD dev evaluation. I'll review and approve the final run.
+Based on these 66-question results, propose what should be tuned/fixed before running the full 1534-question BIRD dev evaluation. I'll review and approve the final run.
 ```
 
 ---
@@ -543,7 +543,7 @@ Based on these 50-question results, propose what should be tuned/fixed before ru
 ## ★ Final Checkpoint — Full BIRD Evaluation + Phase 1 Summary
 
 ```
-The 50-question smoke test passed and we've reviewed the results. Now run the full BIRD dev evaluation:
+The 66-question smoke test passed and we've reviewed the results. Now run the full BIRD dev evaluation:
 
 python scripts/run_evaluation.py --split dev --output results/phase1_dev_results.json --workers 5
 

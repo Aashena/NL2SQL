@@ -13,12 +13,16 @@ free-text parsing.
 """
 
 import json
+import logging
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Optional
 
+logger = logging.getLogger(__name__)
+
 from src.config.settings import settings
 from src.llm import get_client, ToolParam, CacheableText, LLMResponse
+from src.llm.base import LLMError
 from src.preprocessing.profiler import ColumnProfile, DatabaseProfile
 
 
@@ -192,29 +196,68 @@ async def summarize_database(
 
         for batch in batches:
             user_prompt = _build_user_prompt(table_name, batch)
-            response: LLMResponse = await client.generate(
-                model=settings.model_fast,
-                system=system,
-                messages=[{"role": "user", "content": user_prompt}],
-                tools=[_SUMMARIZE_FIELDS_TOOL],
-                tool_choice_name="summarize_fields",
-                max_tokens=2000,
-            )
-            result = response.tool_inputs[0] if response.tool_inputs else {"summaries": []}
+            try:
+                response: LLMResponse = await client.generate(
+                    model=settings.model_fast,
+                    system=system,
+                    messages=[{"role": "user", "content": user_prompt}],
+                    tools=[_SUMMARIZE_FIELDS_TOOL],
+                    tool_choice_name="summarize_fields",
+                    max_tokens=2000,
+                )
+                result = response.tool_inputs[0] if response.tool_inputs else {"summaries": []}
 
-            for item in result.get("summaries", []):
-                col_name = item.get("column_name", "")
-                short = item.get("short_summary", "")
-                long_ = item.get("long_summary", "")
-                short, long_ = _enforce_length_limits(short, long_)
-                received[col_name] = (short, long_)
+                for item in result.get("summaries", []):
+                    col_name = item.get("column_name", "")
+                    short = item.get("short_summary", "")
+                    long_ = item.get("long_summary", "")
+                    short, long_ = _enforce_length_limits(short, long_)
+                    received[col_name] = (short, long_)
+
+            except LLMError:
+                if len(batch) > 1:
+                    # Retry each column individually before falling back to defaults
+                    logger.warning(
+                        "Batch of %d cols failed for %s/%s, retrying individually",
+                        len(batch), db_id, table_name,
+                    )
+                    for single_col in batch:
+                        try:
+                            single_user_prompt = _build_user_prompt(table_name, [single_col])
+                            single_response = await client.generate(
+                                model=settings.model_fast,
+                                system=system,
+                                messages=[{"role": "user", "content": single_user_prompt}],
+                                tools=[_SUMMARIZE_FIELDS_TOOL],
+                                tool_choice_name="summarize_fields",
+                                max_tokens=2000,
+                            )
+                            single_result = (
+                                single_response.tool_inputs[0]
+                                if single_response.tool_inputs
+                                else {"summaries": []}
+                            )
+                            for item in single_result.get("summaries", []):
+                                col_name = item.get("column_name", "")
+                                short = item.get("short_summary", "")
+                                long_ = item.get("long_summary", "")
+                                short, long_ = _enforce_length_limits(short, long_)
+                                received[col_name] = (short, long_)
+                        except LLMError:
+                            logger.warning(
+                                "Column %s/%s.%s still failed on individual retry, will use default",
+                                db_id, table_name, single_col.column_name,
+                            )
+                # else: single-column batch already failed → will use default
 
         # Build FieldSummary objects for every column in the table
+        default_fallback_cols: list[str] = []
         for col in columns:
             if col.column_name in received:
                 short, long_ = received[col.column_name]
             else:
                 short, long_ = _default_summary(table_name, col.column_name)
+                default_fallback_cols.append(col.column_name)
             all_summaries.append(
                 FieldSummary(
                     table_name=table_name,
@@ -222,6 +265,11 @@ async def summarize_database(
                     short_summary=short,
                     long_summary=long_,
                 )
+            )
+        if default_fallback_cols:
+            logger.warning(
+                "%s/%s: %d column(s) used default fallback summary: %s",
+                db_id, table_name, len(default_fallback_cols), default_fallback_cols,
             )
 
     db_summary = DatabaseSummary(db_id=db_id, field_summaries=all_summaries)

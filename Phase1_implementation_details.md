@@ -1540,31 +1540,33 @@ Features:
 
 ## End-to-End Tests
 
-### E2E Smoke Test (50 Questions)
+### E2E Smoke Test (66 Questions)
 
 **File:** `tests/e2e/test_bird_mini.py`
 
-**Purpose:** Fast validation that the full pipeline runs without crashes on representative questions. Uses live API calls (marks with `@pytest.mark.live`).
+**Purpose:** Fast validation that the full pipeline runs without crashes on representative questions covering all 11 BIRD dev databases across all difficulty levels. Uses live API calls (marks with `@pytest.mark.live`).
+
+**Sampling strategy:** For each of the 11 BIRD dev databases, randomly select 6 questions: 2 simple, 2 moderate, and 2 challenging. Total: 66 questions. The random selection must be seeded (`random.seed(42)`) so tests are reproducible. Never use "first N questions" — the BIRD dev questions are ordered by database and would only cover one database.
 
 **Tests to write:**
 
-1. `test_pipeline_runs_50_questions` — Run the full pipeline on the first 50 questions of BIRD mini-dev. Assert:
+1. `test_pipeline_runs_66_questions` — Run the full pipeline on 66 BIRD dev questions (6 per database: 2 simple, 2 moderate, 2 challenging, random.seed(42)). Assert:
    - No unhandled exceptions
-   - All 50 questions produce a non-empty SQL string
+   - All 66 questions produce a non-empty SQL string
    - EX accuracy >= 50% (basic sanity bar)
    - No question takes > 60 seconds end-to-end
 
-2. `test_fast_path_rate_reasonable` — Among 50 questions, at least 30% trigger the fast path (unanimous agreement).
+2. `test_fast_path_rate_reasonable` — Among 66 questions, at least 30% trigger the fast path (unanimous agreement).
 
-3. `test_query_fixer_rescue_rate` — Among all failing candidates across 50 questions, at least 30% are successfully fixed.
+3. `test_query_fixer_rescue_rate` — Among all failing candidates across 66 questions, at least 30% are successfully fixed.
 
-4. `test_cost_estimate_reasonable` — Total API cost for 50 questions < $10 (based on token counting).
+4. `test_cost_estimate_reasonable` — Total API cost for 66 questions < $14 (based on token counting).
 
-5. `test_results_saved_to_disk` — After running, a JSON results file exists with 50 entries.
+5. `test_results_saved_to_disk` — After running, a JSON results file exists with 66 entries.
 
 **How to run:**
 ```bash
-pytest tests/e2e/test_bird_mini.py -v -m live --timeout=300
+pytest tests/e2e/test_bird_mini.py -v -m live --timeout=600
 ```
 
 ### E2E Full BIRD Dev Evaluation
@@ -1620,7 +1622,7 @@ pytest tests/e2e/test_bird_full.py -v -m live --timeout=7200  # 2 hour timeout
 | 13 | `online_pipeline.py` (partial: Ops 5+6+7) + integration tests |
 | 14 | `test_generation_diversity.py` integration tests |
 
-**Milestone 2:** Run the pipeline through Op 7 on 10 BIRD questions. Verify 10–11 candidates are generated per question.
+**Milestone 2:** Run the pipeline through Op 7 on 33 BIRD dev questions (3 per each of the 11 databases: 1 simple, 1 moderate, 1 challenging, random.seed(42)). Verify 10–11 candidates are generated per question.
 
 ### Week 3 — Completion + E2E (Ops 8, 9)
 
@@ -1631,7 +1633,7 @@ pytest tests/e2e/test_bird_full.py -v -m live --timeout=7200  # 2 hour timeout
 | 17 | `adaptive_selector.py` (tests 9–12) + edge cases |
 | 18 | `online_pipeline.py` (complete: all ops) + `test_online_pipeline.py` |
 | 19 | `evaluator.py` + `scripts/run_evaluation.py` |
-| 20 | `tests/e2e/test_bird_mini.py` — smoke test on 50 questions |
+| 20 | `tests/e2e/test_bird_mini.py` — smoke test on 66 questions (6 per database: 2 simple, 2 moderate, 2 challenging) |
 | 21 | Full BIRD dev evaluation + `tests/e2e/test_bird_full.py` |
 
 **Milestone 3:** Full BIRD dev evaluation complete with results report. EX ≥ 68% achieved.
@@ -1647,7 +1649,7 @@ pytest tests/unit/ -v
 # Run integration tests (mocked API, fast)
 pytest tests/integration/ -v
 
-# Run e2e smoke test (live API, ~$2–5, ~10 minutes)
+# Run e2e smoke test on 66 questions (live API, ~$2–6, ~15 minutes)
 pytest tests/e2e/test_bird_mini.py -v -m live
 
 # Run full BIRD evaluation (live API, ~$150–200, ~4–8 hours)

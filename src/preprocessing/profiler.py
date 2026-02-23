@@ -7,14 +7,21 @@ min/max/avg, null rates, FK references, and MinHash signatures for LSH indexing.
 Results can be cached to disk as JSON for offline re-use.
 """
 
+import base64
 import json
+import logging
 import sqlite3
+import struct
 from dataclasses import dataclass, field, asdict
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Optional
 
 from datasketch import MinHash
+
+logger = logging.getLogger(__name__)
+
+_MINHASH_SAMPLE_LIMIT = 50_000
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +96,20 @@ class DatabaseProfile:
     foreign_keys: list       # list of (from_table, from_col, to_table, to_col)
     total_tables: int
     total_columns: int
+
+
+# ---------------------------------------------------------------------------
+# MinHash JSON compression helpers
+# ---------------------------------------------------------------------------
+
+def _encode_minhash(values: list[int]) -> str:
+    """Encode 128 uint64 minhash values as a base64 string (~1365 chars vs ~1900 in JSON array)."""
+    return base64.b64encode(struct.pack("128Q", *values)).decode("ascii")
+
+
+def _decode_minhash(encoded: str) -> list[int]:
+    """Decode a base64 string back to 128 uint64 minhash values."""
+    return list(struct.unpack("128Q", base64.b64decode(encoded)))
 
 
 # ---------------------------------------------------------------------------
@@ -293,11 +314,23 @@ def profile_database(
                     if avg_len_row and avg_len_row[0] is not None:
                         avg_length = float(avg_len_row[0])
 
-                # MinHash over all non-NULL values
-                all_values_rows = conn.execute(
-                    f'SELECT "{col_name}" FROM "{table}" '
-                    f'WHERE "{col_name}" IS NOT NULL'
-                ).fetchall()
+                # MinHash over non-NULL values (sampled if column is very large)
+                if distinct_count > _MINHASH_SAMPLE_LIMIT:
+                    logger.warning(
+                        "Column %s.%s has %d distinct values (> %d); "
+                        "sampling %d rows for MinHash to avoid slow computation",
+                        table, col_name, distinct_count, _MINHASH_SAMPLE_LIMIT, _MINHASH_SAMPLE_LIMIT,
+                    )
+                    all_values_rows = conn.execute(
+                        f'SELECT "{col_name}" FROM "{table}" '
+                        f'WHERE "{col_name}" IS NOT NULL '
+                        f'LIMIT {_MINHASH_SAMPLE_LIMIT}'
+                    ).fetchall()
+                else:
+                    all_values_rows = conn.execute(
+                        f'SELECT "{col_name}" FROM "{table}" '
+                        f'WHERE "{col_name}" IS NOT NULL'
+                    ).fetchall()
                 all_values = [r[0] for r in all_values_rows]
                 minhash_bands = _build_minhash(all_values)
 
@@ -350,9 +383,15 @@ def profile_database(
 # ---------------------------------------------------------------------------
 
 def _save_profile_to_json(profile: DatabaseProfile, path: Path) -> None:
-    """Serialise a DatabaseProfile to JSON file."""
+    """Serialise a DatabaseProfile to JSON file.
+
+    minhash_bands (128 uint64 ints) is encoded as a base64 string to reduce
+    file size (~33% smaller than a JSON integer array).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     data = asdict(profile)
+    for col_data in data["columns"]:
+        col_data["minhash_bands"] = _encode_minhash(col_data["minhash_bands"])
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, default=str, indent=2)
 
@@ -361,6 +400,13 @@ def _load_profile_from_json(path: Path) -> DatabaseProfile:
     """Deserialise a DatabaseProfile from a JSON file."""
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
+
+    for col_data in data.get("columns", []):
+        raw = col_data.get("minhash_bands", [])
+        # Decode base64 string written by _save_profile_to_json; fall back
+        # gracefully for old-format files that stored a plain list of ints.
+        if isinstance(raw, str):
+            col_data["minhash_bands"] = _decode_minhash(raw)
 
     columns = [ColumnProfile(**col) for col in data.get("columns", [])]
 

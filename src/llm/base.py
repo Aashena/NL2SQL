@@ -51,6 +51,7 @@ class LLMResponse:
     thinking: Optional[str] = None     # reasoning trace when thinking is enabled
     input_tokens: int = 0
     output_tokens: int = 0
+    finish_reason: Optional[str] = None  # raw finish_reason from provider (diagnostic)
 
 
 class LLMClient(ABC):
