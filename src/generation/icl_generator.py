@@ -138,7 +138,7 @@ class ICLGenerator:
         client = get_client()
         try:
             response = await client.generate(
-                model=settings.model_powerful,
+                model=settings.model_powerful_list,
                 system=system_blocks,
                 messages=[{"role": "user", "content": user_prompt}],
                 tools=[],

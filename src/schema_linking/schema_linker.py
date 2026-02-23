@@ -53,8 +53,13 @@ _SELECT_COLUMNS_TOOL = ToolParam(
                         "table": {"type": "string"},
                         "column": {"type": "string"},
                         "reason": {"type": "string"},
+                        "role": {
+                            "type": "string",
+                            "enum": ["select", "where", "join", "group_by", "order_by"],
+                            "description": "The SQL clause this column primarily serves",
+                        },
                     },
-                    "required": ["table", "column", "reason"],
+                    "required": ["table", "column", "reason", "role"],
                 },
             }
         },
@@ -523,13 +528,18 @@ async def link_schema(
         f"Evidence: {evidence_str}\n"
         f"Matched values:\n{formatted_cells}\n\n"
         "Select only columns DEFINITELY needed to answer this question. "
-        "Select at most 20 of the most relevant fields."
+        "Select at most 20 of the most relevant fields. "
+        "Also include columns that will appear in the SELECT clause "
+        "(output columns the question asks to return), not only columns "
+        "needed for WHERE conditions and JOINs. "
+        "For each column, set 'role' to the SQL clause it primarily serves "
+        "(select, where, join, group_by, or order_by)."
     )
 
     client = get_client()
     try:
         response_s1 = await client.generate(
-            model=settings.model_powerful,
+            model=settings.model_powerful_list,
             system=[system_block_1, system_block_2],
             messages=[{"role": "user", "content": user_msg_s1}],
             tools=[_SELECT_COLUMNS_TOOL],
@@ -543,7 +553,7 @@ async def link_schema(
             "Schema linker S1 LLM call failed (%s); falling back to FAISS top-15 as S1.", exc
         )
         s1_raw = [
-            {"table": t, "column": c, "reason": "FAISS-rank-fallback"}
+            {"table": t, "column": c, "reason": "FAISS-rank-fallback", "role": "where"}
             for t, c, _ss, _ls in candidates[:15]
         ]
 
@@ -554,10 +564,12 @@ async def link_schema(
         t = item.get("table", "")
         c = item.get("column", "")
         r = item.get("reason", "")
+        role = item.get("role", "")
         key = (t, c)
         if key in available_field_set:
             s1_selected.add(key)
-            s1_reasons.append(f"{t}.{c}: {r}")
+            role_tag = f"[{role}] " if role else ""
+            s1_reasons.append(f"{role_tag}{t}.{c}: {r}")
         else:
             logger.warning(
                 "Hallucinated field filtered out from S₁: %s.%s", t, c
@@ -580,13 +592,25 @@ async def link_schema(
                 pk_key = (table, pk_col)
                 if pk_key in available_field_set:
                     result.add(pk_key)
-        # Add FK columns that reference already-selected or PK-bearing tables
+        # Add FK columns and their referenced target columns for tables in S1.
+        # "FK closure": for every FK where both from_table and to_table are
+        # already selected, add both the FK column (from_col) AND the target
+        # column (to_col).  This handles non-PK join targets like
+        # Player.player_api_id which PK auto-promotion alone would miss.
         selected_tables = {t for t, _c in result}
         for table in list(selected_tables):
             for local_col, ref_str in fk_map.get(table, []):
+                # (1) always add the FK column itself
                 fk_key = (table, local_col)
                 if fk_key in available_field_set:
                     result.add(fk_key)
+                # (2) add the referenced column when its table is already selected
+                m = re.match(r"(\S+)\((\S+)\)", ref_str)  # e.g. "Player(player_api_id)"
+                if m:
+                    ref_table, ref_col = m.group(1), m.group(2)
+                    ref_key = (ref_table, ref_col)
+                    if ref_table in selected_tables and ref_key in available_field_set:
+                        result.add(ref_key)
         return result
 
     s1_tables = {t for t, _c in s1_selected}
@@ -680,12 +704,16 @@ async def link_schema(
             f"Evidence: {evidence_str}\n"
             f"Matched values:\n{formatted_cells}\n\n"
             "Select columns that MIGHT be needed to answer this question "
-            "(cast a wider net — include columns that could be relevant)."
+            "(cast a wider net — include columns that could be relevant). "
+            "Also include output columns (SELECT clause) that the question asks "
+            "to return, not only columns needed for WHERE conditions and JOINs. "
+            "For each column, set 'role' to the SQL clause it primarily serves "
+            "(select, where, join, group_by, or order_by)."
         )
 
         try:
             response_s2 = await client.generate(
-                model=settings.model_powerful,
+                model=settings.model_powerful_list,
                 system=[system_block_1, system_block_2_remaining],
                 messages=[{"role": "user", "content": user_msg_s2}],
                 tools=[_SELECT_COLUMNS_TOOL],
@@ -705,11 +733,12 @@ async def link_schema(
             t = item.get("table", "")
             c = item.get("column", "")
             r = item.get("reason", "")
+            role = item.get("role", "")
             key = (t, c)
             if key in available_field_set:
                 s2_new.add(key)
-                s2_reasons_item = f"{t}.{c}: {r}"
-                s1_reasons.append(s2_reasons_item)
+                role_tag = f"[{role}] " if role else ""
+                s1_reasons.append(f"{role_tag}{t}.{c}: {r}")
             else:
                 logger.warning(
                     "Hallucinated field filtered out from S₂: %s.%s", t, c

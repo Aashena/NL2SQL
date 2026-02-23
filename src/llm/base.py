@@ -6,9 +6,12 @@ provider (Anthropic, Gemini) implements this interface so the rest of the
 codebase stays provider-agnostic.
 """
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -60,13 +63,17 @@ class LLMClient(ABC):
 
     All structured outputs use tool_use. Retry logic is handled internally
     by each implementation — callers do not need to retry.
+
+    Model fallback:
+        Pass model as a list[str] to enable automatic fallback. If the first
+        model raises LLMRateLimitError (rate limit after all retries), the next
+        model in the list is tried. Non-rate-limit errors propagate immediately.
     """
 
-    @abstractmethod
     async def generate(
         self,
         *,
-        model: str,
+        model: "str | list[str]",
         system: list[CacheableText],
         messages: list[dict[str, Any]],
         tools: list[ToolParam],
@@ -81,7 +88,9 @@ class LLMClient(ABC):
         Parameters
         ----------
         model:
-            Model identifier string (e.g. "claude-sonnet-4-6" or "gemini-2.5-pro").
+            Model identifier string (e.g. "claude-sonnet-4-6") or a list of
+            model identifiers for automatic fallback. When a list is supplied,
+            models are tried in order; fallback only occurs on LLMRateLimitError.
         system:
             Ordered list of system prompt blocks. Use CacheableText(cache=True)
             on large blocks to enable prompt caching where supported.
@@ -104,10 +113,64 @@ class LLMClient(ABC):
         ------
         LLMError
             When the call fails after all internal retries are exhausted.
+        LLMRateLimitError
+            When all models in the fallback list are rate-limited after retries.
         """
+        models: list[str] = [model] if isinstance(model, str) else list(model)
+        last_exc: Optional[LLMRateLimitError] = None
+
+        for idx, m in enumerate(models):
+            try:
+                return await self._generate_single(
+                    model=m,
+                    system=system,
+                    messages=messages,
+                    tools=tools,
+                    tool_choice_name=tool_choice_name,
+                    thinking=thinking,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+            except LLMRateLimitError as exc:
+                last_exc = exc
+                if idx < len(models) - 1:
+                    logger.warning(
+                        "Rate limit on model %r (attempt %d/%d); falling back to %r",
+                        m, idx + 1, len(models), models[idx + 1],
+                    )
+            # Non-rate-limit LLMError propagates immediately (no except clause)
+
+        raise last_exc  # type: ignore[misc]  # reached only when all models are exhausted
+
+    @abstractmethod
+    async def _generate_single(
+        self,
+        *,
+        model: str,
+        system: list[CacheableText],
+        messages: list[dict[str, Any]],
+        tools: list[ToolParam],
+        tool_choice_name: Optional[str] = None,
+        thinking: Optional[ThinkingConfig] = None,
+        max_tokens: int = 2000,
+        temperature: float = 1.0,
+    ) -> LLMResponse:
+        """Single-model generate call. Implemented by each provider."""
         ...
 
 
 class LLMError(Exception):
     """Raised when an LLM call fails after all retries are exhausted."""
+    pass
+
+
+class LLMRateLimitError(LLMError):
+    """
+    Raised when a call fails specifically due to a rate limit (HTTP 429 / quota
+    exhaustion), after all per-model retries are exhausted.
+
+    When model is passed as a list to generate(), this error triggers fallback
+    to the next model. This is a subclass of LLMError so code that only catches
+    LLMError is unaffected.
+    """
     pass

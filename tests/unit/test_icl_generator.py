@@ -217,8 +217,8 @@ async def test_powerful_model_used(schemas, grounding):
 
     for i, ca in enumerate(mock_client.generate.call_args_list):
         model_used = ca.kwargs.get("model")
-        assert model_used == settings.model_powerful, (
-            f"Call {i}: expected model={settings.model_powerful!r}, got {model_used!r}"
+        assert model_used == settings.model_powerful_list, (
+            f"Call {i}: expected model={settings.model_powerful_list!r}, got {model_used!r}"
         )
 
 

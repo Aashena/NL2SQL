@@ -152,5 +152,11 @@ def build_base_prompt(question: str, evidence: str, cell_matches: list) -> str:
         "Trust the question wording to determine the output format, number of rows, "
         "and whether to aggregate."
     )
+    lines.append(
+        "5. Binary output format: When the question asks whether something is true/false, "
+        "yes/no, or carcinogenic/not carcinogenic, return 'YES' or 'NO' (not full words like "
+        "'carcinogenic' or 'not carcinogenic'). Use IIF(condition, 'YES', 'NO') or "
+        "CASE WHEN condition THEN 'YES' ELSE 'NO' END."
+    )
 
     return "\n".join(lines)

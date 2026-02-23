@@ -12,7 +12,12 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     gemini_api_key: str = ""
 
-    # Model tiers — leave as "" to use provider defaults (filled by validator below)
+    # Model tiers — leave as "" to use provider defaults (filled by validator below).
+    # Supports comma-separated fallback lists, e.g.:
+    #   MODEL_POWERFUL=gemini-2.5-pro,gemini-2.5-flash
+    # When a list is provided, the first model is the primary; subsequent models
+    # are tried automatically if the primary hits a rate limit.
+    #
     # model_fast:      lightweight tasks — field summarization, keyword extraction,
     #                  query fixing, pairwise selection, Generator B1
     # model_powerful:  complex reasoning — schema linking, Generator B2, Generator C (ICL)
@@ -20,6 +25,12 @@ class Settings(BaseSettings):
     model_fast: str = ""
     model_powerful: str = ""
     model_reasoning: str = ""
+
+    # Parsed fallback lists — populated automatically from the comma-separated tier fields.
+    # Use these when calling client.generate() to enable automatic model fallback.
+    model_fast_list:      list[str] = Field(default_factory=list)
+    model_powerful_list:  list[str] = Field(default_factory=list)
+    model_reasoning_list: list[str] = Field(default_factory=list)
 
     # Paths
     bird_data_dir: str = "./data/bird"
@@ -63,6 +74,26 @@ class Settings(BaseSettings):
         for field_name, default_val in defaults.items():
             if not getattr(self, field_name):
                 setattr(self, field_name, default_val)
+        return self
+
+    @model_validator(mode="after")
+    def _parse_model_lists(self) -> "Settings":
+        """Split comma-separated model tier values into ordered fallback lists.
+
+        Runs after _apply_model_defaults so defaults are already filled in.
+        The first element of each list is the primary model (same as the str field).
+        """
+        self.model_fast_list      = [m.strip() for m in self.model_fast.split(",")      if m.strip()]
+        self.model_powerful_list  = [m.strip() for m in self.model_powerful.split(",")  if m.strip()]
+        self.model_reasoning_list = [m.strip() for m in self.model_reasoning.split(",") if m.strip()]
+        # Normalise the primary string field to just the first model name so it
+        # remains usable as a plain string regardless of what was in the env var.
+        if self.model_fast_list:
+            self.model_fast = self.model_fast_list[0]
+        if self.model_powerful_list:
+            self.model_powerful = self.model_powerful_list[0]
+        if self.model_reasoning_list:
+            self.model_reasoning = self.model_reasoning_list[0]
         return self
 
     model_config = {
