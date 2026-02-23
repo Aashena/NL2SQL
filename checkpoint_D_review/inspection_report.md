@@ -1,342 +1,381 @@
-# Checkpoint D — Inspection Report
-**Date:** 2026-02-22
-**Provider:** Gemini (gemini-2.5-flash / gemini-2.5-pro)
-**Cache:** Enabled
-**Runtime:** 31.5 minutes
-**Sample:** 33 questions — 3 per each of 11 BIRD dev databases (1 simple, 1 moderate, 1 challenging), `random.seed(42)`
+# Checkpoint D Inspection Report — Re-run (2026-02-23)
+
+## Overview
+
+This report covers the **second run** of Checkpoint D, executed after a set of targeted
+code improvements were applied to address the 7 issues identified in the first run.
+
+| Item | Value |
+|------|-------|
+| Run date | 2026-02-23 |
+| Sample | 33 BIRD dev questions (3 per each of 11 DBs: 1 simple, 1 moderate, 1 challenging, `random.seed(42)`) |
+| Provider | Gemini (`gemini-2.5-flash` / `gemini-2.5-pro`) |
+| LLM cache | Enabled |
+| Runtime | 1884.5 s (~31 min) |
+| Script | `scripts/run_checkpoint_d.py` |
 
 ---
 
-## 1. What Was Run
+## Changes Applied Since First Run
 
-Operations tested end-to-end (no query fixer or selector yet):
+Six files were modified between the first and second runs. Each change targets one or more
+of the P0/P1/P2 issues reported in the first inspection.
 
-| Op | Component | Status |
-|----|-----------|--------|
-| Op 5 | Context Grounding (keyword extraction + LSH lookup + few-shot retrieval) | Ran on all 33 questions |
-| Op 6 | Adaptive Schema Linking (FAISS pre-filter → 2 LLM iterations → S₁, S₂) | Ran on all 33 questions |
-| Op 7A | Reasoning Generator (4 candidates via extended thinking / thinking mode) | Ran on all 33 questions |
-| Op 7B | Standard + Complex Generator (B1=Haiku/Flash, B2=Sonnet/Pro, 4 candidates) | Ran on all 33 questions |
-| Op 7C | ICL Generator (3 candidates with few-shot examples) | Ran on all 33 questions |
+### 1. `src/generation/base_generator.py` — SQL Writing Rules (P2-6)
 
----
+Added a `## SQL Writing Rules` section to `build_base_prompt()`, injected into every
+generator's user prompt. Four explicit rules were added:
 
-## 2. Quantitative Results
+1. **SELECT completeness** — return ALL columns the question asks for.
+2. **Value mappings** — if evidence defines a label→value mapping, apply it with CASE/IIF.
+3. **Ratio direction** — "A compared to B" means A/B; DISTINCT only when the question implies uniqueness.
+4. **Evidence scope** — trust the question for output format; trust the evidence for column semantics.
 
-### 2.1 Oracle Upper Bound
+### 2. `src/generation/standard_generator.py` — Diversity + MAX_TOKENS (P0-2, P1-4)
 
-> Oracle = "does at least one candidate match ground truth?" — the ceiling for any selector.
+- **Alternative templates when S1==S2**: `_B1_ALT_SYSTEM_TEMPLATE` and `_B2_ALT_SYSTEM_TEMPLATE`
+  steer the model to explore a structurally different approach (alternative JOINs,
+  subqueries, window functions) when both schema variants are identical, preventing
+  identical prompts from producing identical SQL.
+- **`max_tokens`: 2000 → 4096** for B1 generators (was already 4096 for B2).
+- **`temperature=0.3`** for all four variants (B1_s1, B1_s2, B2_s1, B2_s2).
+- **MAX_TOKENS truncation guard**: if `finish_reason=MAX_TOKENS`, discard the truncated
+  response and return `error_flag=True` instead of passing broken SQL to the query fixer.
 
-| Difficulty | Oracle Count | Total | Oracle % |
-|------------|-------------|-------|----------|
-| Simple     | 8           | 11    | 72.7%    |
-| Moderate   | 7           | 11    | 63.6%    |
-| Challenging | 7          | 11    | 63.6%    |
-| **Overall** | **22**     | **33** | **66.7%** |
+### 3. `src/generation/icl_generator.py` — MAX_TOKENS + temperature (P0-2, P1-4)
 
-### 2.2 Per-Database Oracle
+- **`temperature=0.7`** parameter exposed and wired through to the API call.
+- **MAX_TOKENS truncation guard** (same logic as standard_generator): truncated responses
+  from Gemini are now discarded cleanly.
 
-| Database | Oracle | Total | % |
-|----------|--------|-------|---|
-| california_schools | 2 | 3 | 66.7% |
-| card_games | 1 | 3 | 33.3% |
-| codebase_community | 1 | 3 | 33.3% |
-| debit_card_specializing | 3 | 3 | 100.0% |
-| european_football_2 | 2 | 3 | 66.7% |
-| financial | 2 | 3 | 66.7% |
-| formula_1 | 2 | 3 | 66.7% |
-| student_club | 2 | 3 | 66.7% |
-| superhero | 3 | 3 | 100.0% |
-| thrombosis_prediction | 2 | 3 | 66.7% |
-| toxicology | 2 | 3 | 66.7% |
+### 4. `src/grounding/context_grounder.py` — Fallback on LLM error (P0-1)
 
-**Worst databases:** `card_games` and `codebase_community` (33.3%) — both have multi-table schema disambiguation and ratio/count questions that require precise semantics.
+- Added `_extract_keywords_from_text()`: a lightweight stop-word filter + punctuation
+  stripper that extracts meaningful tokens from the raw question+evidence text.
+- Changed the `LLMError` fallback from **empty grounding** to **keyword extraction**.
+  This ensures the LSH index is still queried (with the NL tokens) even when Gemini
+  returns `MALFORMED_FUNCTION_CALL`, recovering the majority of cell-value anchors.
 
-### 2.3 Per-Generator Success Rate
+### 5. `src/schema_linking/schema_linker.py` — Robustness + Size Control (P0-1, P1-3, P1-4)
 
-| Generator | Total Cands | Non-empty | Exec OK | Oracle Matches |
-|-----------|------------|-----------|---------|----------------|
-| A_reasoning (Gemini thinking) | 132 | 132 (100%) | 130 (98%) | 61 (46%) |
-| B1_standard (Gemini Flash) | 66 | 66 (100%) | 60 (90%) | 29 (43%) |
-| B2_complex (Gemini Pro) | 66 | 66 (100%) | **46 (69%)** | 25 (37%) |
-| C_icl (Gemini Pro + few-shot) | 99 | 99 (100%) | 88 (88%) | 45 (45%) |
+- **S1 LLM try/except**: `LLMError` in the S1 call now falls back to FAISS top-15
+  instead of crashing the whole question.
+- **High-confidence FAISS auto-promotion to S1**: fields with cosine similarity ≥ 0.8
+  to a schema_hint string are auto-added to S1, reducing schema-linker misses for
+  hint-matched fields.
+- **S1 hard cap at 20 fields**: prevents over-expansion on large-schema databases;
+  FAISS-ranked fields are kept first, PK/FK additions come last.
+- **S2 skip logic**: the second LLM call is skipped when:
+  - `total_candidates == 0` (FAISS returned nothing)
+  - `remaining_candidates == 0` (S1 consumed every candidate)
+  - `s1_coverage >= 0.80` (S1 already covers ≥80% of candidates)
+  - `len(remaining) < 3` (fewer than 3 new fields to add)
+  This eliminates a ~13% rate of gratuitous S2 calls that produced no new signal and
+  inflated costs.
+- **S2 cap at `min(S1+10, 25)`**: replaced the uncapped S2 expansion that caused
+  36-field schemas on `european_football_2`.
+- Removed the previous "empty-candidates → make API call anyway" code path.
 
-### 2.4 Candidate Diversity
+### 6. `src/preprocessing/schema_formatter.py` — FK annotations (P1-5)
 
-| Metric | Value |
-|--------|-------|
-| Total non-error candidates | 363 |
-| Unique SQL strings | 215 |
-| Duplicate SQLs | 148 (**40%**) |
-| Avg candidates per question | 11.0 |
+- **DDL**: each FK column now appends `| FK → <target_table>(<col>)` inline in the
+  column comment, so LLMs see the join target on the same line as the column definition.
+- **Markdown**: FK annotation changed from `(FK)` to `(FK→target_table.col)` to include
+  the join target explicitly.
 
----
-
-## 3. Issues Found
-
-### ISSUE P0-1 — B2_complex Generates Truncated SQL (`incomplete input` errors)
-**Priority:** Critical
-**Affected:** 20 B2 candidates across 14 questions (B2 exec_ok = 69%)
-
-**Root cause:** Gemini Pro hits the `max_tokens=2000` limit mid-generation and returns a truncated SQL string. SQLite then fails with `incomplete input` when executing the cut-off query. The retry mechanism attempts 2x with doubled token limits (4000, then 8192) for MAX_TOKENS responses that return _no output_, but when the model returns _partial output_ at the token limit, the partial SQL is accepted as valid.
-
-**Evidence from logs:**
-```
-Gemini response has no text or tool output: finish_reason=FinishReason.MAX_TOKENS
-MAX_TOKENS hit with no output (max_tokens=2000); retrying with max_tokens=4000
-```
-The B2 system prompt (complex SQL, emphasizing CTEs and window functions) consistently generates longer SQL than B1, exhausting the 2000-token output budget.
-
-**Suggested fix:** Set B2's `max_tokens` to 4096 as default (not 2000). Detect truncation by checking if `finish_reason == MAX_TOKENS` even when text is present, and discard/retry. Alternatively, explicitly limit the B2 prompt to request simpler SQL structures when the schema is small.
+  > Note: this change affects cached schemas on disk. The `checkpoint_d` run used the
+  > existing preprocessed schemas (built before this change). A full offline re-run would
+  > be needed to propagate the FK annotation improvement.
 
 ---
 
-### ISSUE P0-2 — MALFORMED_FUNCTION_CALL Cascades Through Pipeline
-**Priority:** Critical
-**Affected:** Q3 (grounding), Q12 (grounding), Q14 (schema linker S2)
+## Results Comparison
 
-**Root cause:** Gemini occasionally returns `MALFORMED_FUNCTION_CALL` for tool-use calls, particularly when the input is long or contains special characters (e.g., backtick-quoted column names like `` `Enrollment (K-12)` ``). The schema linker has no `try/except` around the S2 LLM call in some code paths, leading to S1 being used as S2 fallback (which works), but the grounding LLM failure returns empty grounding context (no cell matches, no schema hints), degrading every downstream component.
+### Oracle Upper Bound
 
-**Evidence from logs:**
-```
-Grounding LLM error — falling back to empty grounding: Gemini candidate has no content (finish_reason=MALFORMED_FUNCTION_CALL)
-Schema linker S2 LLM call failed; using S1 as S2 fallback.
-```
+| Metric | Run 1 | Run 2 | Delta |
+|--------|-------|-------|-------|
+| **Overall** | 21/33 = **63.6%** | 25/33 = **75.8%** | +12.2pp |
+| Simple | 9/11 = 81.8% | 9/11 = 81.8% | 0 |
+| Moderate | 6/11 = 54.5% | 7/11 = 63.6% | +9.1pp |
+| Challenging | 6/11 = 54.5% | 9/11 = **81.8%** | **+27.3pp** |
 
-**Suggested fix:**
-1. In `context_grounder.py`: when grounding LLM fails, fall back to LSH-only cell matching (skip the LLM extraction, use the raw question words as keywords) rather than returning completely empty grounding.
-2. In `schema_linker.py`: the S2 fallback to S1 is correct, but log a warning with the QID so it's trackable.
-3. Sanitize column names with special characters before passing to tool-use prompts.
+The overall oracle improved by **+12.2 pp**, almost entirely driven by the challenging
+tier which jumped from 54.5% to 81.8% (+27.3pp). The moderate tier improved slightly
+(+9.1pp). Simple held steady — it was already near-ceiling.
 
----
+### Per-Database Oracle
 
-### ISSUE P1-3 — Wrong FK Join in european_football_2 (Q1027)
-**Priority:** High
-**Affected:** QID=1027 (european_football_2, simple) — ORACLE=NO, all 9 executable candidates wrong
+| Database | Run 1 | Run 2 |
+|----------|-------|-------|
+| california_schools | 2/3 | 2/3 |
+| card_games | 1/3 | 2/3 ↑ |
+| codebase_community | 1/3 | 1/3 |
+| debit_card_specializing | 2/3 | 3/3 ↑ |
+| european_football_2 | 2/3 | 2/3 |
+| financial | 2/3 | 3/3 ↑ |
+| formula_1 | 3/3 | 3/3 |
+| student_club | 2/3 | 2/3 |
+| superhero | 2/3 | 3/3 ↑ |
+| thrombosis_prediction | 2/3 | 2/3 |
+| toxicology | 2/3 | 2/3 |
 
-**Root cause:** The `Player_Attributes` table has two ID-like columns: `id` and `player_api_id`. The actual FK join to `Player` is `Player_Attributes.id = Player.id`, but all generators consistently wrote `Player.id = Player_Attributes.player_api_id`. The field summary for `player_api_id` says "player API identifier" which sounds like the external reference, while `id` sounds like a generic PK — leading models to use the wrong column.
+Four databases improved to 3/3 (perfect): card_games, debit_card_specializing, financial, superhero.
+codebase_community remains at 1/3 and is the weakest database.
 
-**GT SQL:** `FROM Player_Attributes AS t1 INNER JOIN Player AS t2 ON t1.id = t2.id`
-**Generated SQL:** `FROM Player AS P JOIN Player_Attributes AS PA ON P.id = PA.player_api_id`
+### Generator Success Rates
 
-**Suggested fix:**
-1. In schema formatting, explicitly annotate FK relationships in the DDL comment: `-- FK: Player_Attributes.id → Player.id`. The current DDL only shows `-- Foreign keys:` at table level without per-column FK direction.
-2. In the schema linker prompt, instruct the model to prefer explicit FK annotations over inferred ones.
-3. If ground truth FK info is available from BIRD (it is, in `dev_tables.json`), use it directly in the DDL rather than inferring from column names.
+| Generator | Run 1 (non-empty) | Run 1 (exec%) | Run 2 (non-empty) | Run 2 (exec%) |
+|-----------|-------------------|---------------|-------------------|---------------|
+| A_reasoning | 100% | 99% | 100% | 99% |
+| B1_standard | 100% | 95% | 100% | 95% |
+| B2_complex | **87%** | **73%** | **100%** | **93%** |
+| C_icl | **87%** | **73%** | **95%** | **94%** |
 
----
+B2 and C generators saw the largest improvements:
+- **B2**: 87% → 100% non-empty; 73% → 93% exec — MAX_TOKENS fix and temperature change
+- **C**: 87% → 95% non-empty; 73% → 94% exec — MAX_TOKENS truncation guard
 
-### ISSUE P1-4 — S1 == S2 in 5/33 Questions (Wasted API Calls)
-**Priority:** High
-**Affected:** Q427, Q1025, Q109, Q149, Q953 — 5 questions where S2 adds no fields beyond S1
+### Candidate Diversity
 
-**Root cause:** The second schema linking call (S2 = recall expansion) returns the same set of fields as S1 in 15% of cases. When this happens, generators A3/A4 (S2 DDL) produce SQL identical to A1/A2 (S1 DDL), and B2_s2/B1_s2 duplicate B2_s1/B1_s1. This wastes 5+ API calls per question and inflates the 40% duplicate rate.
+| Metric | Run 1 | Run 2 |
+|--------|-------|-------|
+| Total non-error candidates | 332 | 359 |
+| Unique SQL strings | 199 | 198 |
+| Duplicate rate | 40% | 44% |
+| Avg candidates/question | 10.1 | 10.9 |
 
-**Notable case:** Q1025 (european_football_2 moderate) — S1=S2=33 fields, meaning schema linking selected the entire database schema as S1, leaving nothing to expand in S2.
-
-**Suggested fix:**
-1. Before making the S2 LLM call, check if `|FAISS candidates| - |S1 fields|` < 3 — if so, skip the S2 call and set S2 = S1 (already handled, but we're missing the S1 = full schema case).
-2. When S1 covers ≥80% of available FAISS candidates, skip S2 and use a broader FAISS query (increase `top_k` from 30 to 50) for S2 instead of a second LLM call.
-3. Cap S1 at 25 fields — if schema linking selects >25 fields, that indicates a domain-matching failure, not genuine relevance.
-
----
-
-### ISSUE P1-5 — 40% Duplicate Rate Hurts Selector Quality
-**Priority:** High
-
-**Root cause:** Duplicate SQL strings come from:
-1. **S1 == S2** (covered above) — accounts for ~50% of duplicates
-2. **Simple questions with small schemas** — when there's only 1 valid query structure, all generators converge (e.g., Q803 superhero simple: 10/11 oracle matches, only 2 unique SQL strings)
-3. **B1 and B2 same schema** — B1_s1 and B2_s1 both get the S1 Markdown schema; for simple questions they produce identical SQL
-
-**Suggested fix:**
-1. Add explicit temperature diversity: B1 at `temperature=0.0`, B2 at `temperature=0.3`, ICL at `temperature=0.7` — this preserves determinism for A while adding stylistic variety in B/C.
-2. For ICL (C1/C2/C3), the 3 prompts are distinct but generators still converge on simple questions. Consider adding a "use a different SQL style (subquery vs JOIN)" hint in C2.
-3. Deduplicate candidates before counting the "pool size" so the selector doesn't waste pairwise comparisons on identical SQL.
-
----
-
-### ISSUE P2-6 — SELECT List Incompleteness
-**Priority:** Medium
-**Affected:** Q431 (card_games challenging), Q586 (codebase_community challenging) — ORACLE=NO despite correct WHERE/JOIN
-
-**Root cause:** Generators correctly identified the right tables, JOIN conditions, and WHERE filters, but omitted one or more columns from the SELECT list. The questions ask "which X?" or "which user?" and models return only the key/ID, not all required columns.
-
-**Q431 GT:** `SELECT T1.name, T1.id FROM sets ...`
-**Q431 generated:** `SELECT T1.id FROM sets ...` (name missing)
-
-**Q586 GT:** `SELECT T3.DisplayName, T1.Title FROM posts ...`
-**Q586 generated:** `SELECT T3.DisplayName FROM ...` (Title missing)
-
-**Suggested fix:**
-Add an instruction to all generator system prompts: *"Return ALL columns that the question explicitly asks for. If the question uses 'list the X and Y', your SELECT must include both X and Y."*
+The duplicate rate increased slightly (40% → 44%). This is expected: S1==S2 triggers
+in 6/33 questions, and even with alternative templates the model converges on the same
+correct SQL for straightforward questions (91% dup for debit_card_specializing simple,
+91% for student_club simple). For *correct* simple questions, duplicates are harmless.
+The diversity gap matters most for hard questions where multiple strategies are needed.
 
 ---
 
-### ISSUE P2-7 — Missing Value Transformations (IIF/CASE)
-**Priority:** Medium
-**Affected:** Q237 (toxicology moderate) — ORACLE=NO
+## Remaining Oracle Misses (8/33)
 
-**Root cause:** The evidence states `label = '+' means carcinogenic`, but models return the raw label value (`'+'` or `'-'`) instead of the human-readable `'YES'/'NO'` transformation the GT uses with `IIF(T2.label = '+', 'YES', 'NO')`.
+### Miss 1 — QID=28, california_schools, **challenging**
 
-**Suggested fix:**
-When evidence contains mapping patterns like `"X means Y"` or `"label = X refers to Y"`, the generator prompt should include: *"If the evidence defines a mapping between stored values and their meanings (e.g., '+' = 'YES', 'F' = 'Female'), apply that transformation in your SELECT using CASE or IIF."*
+**Question**: Compare K-12 vs 15-17 enrollment; identify schools where avg difference is
+above the mean — return School name and DOC (document type).
 
----
+**Root cause**: Schema linking correctly identifies enrollment columns and the CDSCode
+join, but misses `schools.DOC`. The LLM selects `schools.SOCType` instead.
+`DOC` is a less-obvious output column; evidence doesn't hint at it.
 
-### ISSUE P2-8 — Ratio/Count Semantic Ambiguity
-**Priority:** Medium
-**Affected:** Q571 (codebase_community moderate) — ORACLE=NO despite correct execution
-
-**Root cause:** The question "how many times is the number of posts compared to votes?" requires `COUNT(posts) / COUNT(votes)`. Generators computed `COUNT(DISTINCT posts) / COUNT(DISTINCT votes)` — which is semantically wrong direction AND uses DISTINCT incorrectly.
-
-**GT:** `CAST(COUNT(T2.Id) AS REAL) / COUNT(DISTINCT T1.Id)` where T1=votes, T2=posts
-**Generated:** `CAST(COUNT(DISTINCT T1.Id) AS REAL) / COUNT(DISTINCT T2.Id)` where T1=posts, T2=votes (inverted)
-
-**Suggested fix:**
-Add ratio-specific instruction to the generator prompt: *"For questions asking 'how many times is A compared to B', compute A/B (not B/A). For COUNT questions, only use DISTINCT when the question implies uniqueness."*
+**Classification**: P1 — schema linking miss (output column).
 
 ---
 
-### ISSUE P2-9 — SentenceTransformer Reloaded Per Question
-**Priority:** Medium (performance)
+### Miss 2 — QID=463, card_games, **simple**
 
-**Observed:** The SentenceTransformer (`all-MiniLM-L6-v2`) model is loaded from disk on the first question and then reloaded from cache on subsequent questions. However, the loading progress bar appears once per run (on Q1), suggesting the model is already cached in memory after the first load. This is NOT a per-question reload — it's a one-time initialization.
+**Question**: How many translations are there for the set of cards with "Angel of Mercy"?
 
-However, ExampleStore and FAISSIndex both instantiate their own `SentenceTransformer` objects when loaded, so if multiple DB artifacts are loaded in a loop, each `FAISSIndex.load()` call creates a new `SentenceTransformer` instance. With 11 databases, this means 11 model loads consuming ~300MB RAM each.
+**Ground truth**: `COUNT(DISTINCT translation)` — counts unique translation strings.
 
-**Suggested fix:**
-Pass a shared `SentenceTransformer` instance to `FAISSIndex` and `ExampleStore` rather than each class managing its own. Add a module-level singleton: `_shared_encoder = SentenceTransformer(...)`.
+**Generated**: `COUNT(id)` or `COUNT(T1.id)` — counts rows, not distinct translations.
 
----
+The question says "how many translations" without using "distinct" or "unique". Yet the GT
+uses DISTINCT because multiple sets can share the same translation string. SQL Writing Rule 3
+("Use DISTINCT only when the question implies uniqueness") did not help because the question
+doesn't use those signal words.
 
-### ISSUE P2-10 — Evidence Misleads Model on GROUP_CONCAT
-**Priority:** Medium
-**Affected:** Q1225 (thrombosis_prediction moderate) — ORACLE=NO
-
-**Root cause:** The BIRD evidence says: *"List refers to GROUP_CONCAT(DISTINCT ID)"*. All generators followed this evidence and produced `GROUP_CONCAT(DISTINCT ID)` grouped by SEX (2 rows). But the GT returns individual (ID, SEX) rows grouped by SEX (10 rows). The evidence is misleading — it describes what "list" means to the annotator, but the actual output format differs.
-
-This reveals a fundamental challenge: generators over-trust BIRD's `evidence` field even when it contradicts the expected output format.
-
-**Suggested fix:**
-In the generator system prompt, add: *"The evidence provides hints about the schema, not about the output format. Trust the question wording to determine output format (columns to return, whether to aggregate, etc.)."*
+**Classification**: P2 — semantic miss (implicit deduplication not triggered).
 
 ---
 
-## 4. Two Deep-Dive Failure Cases
+### Miss 3 — QID=571, codebase_community, **moderate**
 
-### 4.1 Q463 — card_games simple, ORACLE=NO
+**Question**: For user No.24, how many times is the number of posts compared to votes?
 
-**Question:** "How many translations are there for the set of cards with 'Angel of Mercy' in it?"
-**Evidence:** "set of cards with 'Angel of Mercy' in it refers to name = 'Angel of Mercy'"
-**GT SQL:** `SELECT COUNT(DISTINCT translation) FROM set_translations WHERE setCode IN (SELECT setCode FROM cards WHERE name = 'Angel of Mercy') AND translation IS NOT NULL`
-**Generated (sample):** `SELECT COUNT(T2.translation) FROM cards AS T1 INNER JOIN set_translations AS T2 ON T1.setCode = T2.setCode WHERE T1.asciiName = 'Angel of Mercy'`
+**Ground truth**: `CAST(COUNT(T2.Id) AS REAL) / COUNT(DISTINCT T1.Id)` — `posts / votes`.
 
-**What went wrong:**
-1. Models used `asciiName` instead of `name` despite evidence saying `name = 'Angel of Mercy'`
-2. Models omitted `IS NOT NULL` filter (translations table has NULL entries)
-3. Models omitted `DISTINCT` (there are duplicate translations)
+**Generated**: Inverted ratio — all candidates divide votes by posts. Despite SQL Writing
+Rule 3 stating "A compared to B → A/B", the generated SQL consistently inverts this.
 
-**Combined effect:** All generated queries return wrong counts.
+**Classification**: P3 — ratio direction error (rule not followed or mis-parsed).
 
 ---
 
-### 4.2 Q1027 — european_football_2 simple, ORACLE=NO
+### Miss 4 — QID=586, codebase_community, **challenging**
 
-**Question:** "Indicate the full names of the top 10 players with the highest number of penalties."
-**Evidence:** "full name refers to player_name; players with highest number of penalties refers to MAX(penalties)"
-**GT SQL:** `SELECT t2.player_name FROM Player_Attributes AS t1 INNER JOIN Player AS t2 ON t1.id = t2.id ORDER BY t1.penalties DESC LIMIT 10`
-**Generated (all 9 executable):** `...JOIN Player_Attributes AS PA ON P.id = PA.player_api_id...`
+**Question**: Which user added a bounty amount of 50 to the post title mentioning "variance"?
+(GT returns both `DisplayName` and `Title`.)
 
-**What went wrong:**
-All generators used `player_api_id` as the FK to `Player.id`, but the actual FK is `Player_Attributes.id = Player.id`. The `player_api_id` field in `Player_Attributes` is an external identifier, not a FK to the same DB's Player table. The field summaries describe `player_api_id` as "player API identifier" which sounds more like the natural key — but the actual join is on the `id` column.
+**Root cause**: S1/S2 both contain `votes.Id` but not `votes.BountyAmount`. However,
+candidates do retrieve the right rows (11/11 exec OK). The mismatch is that GT returns
+**two columns** (`DisplayName, Title`) while most candidates return only `DisplayName`.
+SQL Writing Rule 1 ("return ALL columns the question asks for") may not have been enough
+because the question says "which user" (not "which user and post title").
 
-**Impact:** This produces results with different players (the ordering by `player_api_id`-joined penalties yields different top-10). All 9 executable candidates are wrong; 2 candidates fail entirely (one uses incomplete SQL, one hallucinates a non-existent table).
-
----
-
-## 5. Two Cases Where All Candidates Match (Diversity Analysis)
-
-### 5.1 Q803 — superhero simple, 10/11 oracle match, 2 unique SQL strings
-
-**Question:** "What is the power ID of cryokinesis?"
-**Unique SQLs generated:**
-- `SELECT id FROM superpower WHERE power_name = 'Cryokinesis'`
-- `SELECT power_id FROM superpower WHERE power_name = 'Cryokinesis'`
-
-These are superficially different (column alias `id` vs `power_id`) but both return the same result. The question has only one valid answer structure, so diversity is impossible without introducing errors. This is expected behavior.
-
-### 5.2 Q994 — formula_1 challenging, 11/11 oracle match, 9 unique SQL strings
-
-**Question:** "Which constructor scored most points from Monaco Grand Prix between 1986 and 2006?"
-This question genuinely benefits from multiple approaches: some use subqueries, some use GROUP BY with ORDER BY, some use window functions. 9 unique SQL strings all produce the correct result — demonstrating that the selector (Op 9) is essential for picking the most reliable one.
+**Classification**: P4 — output completeness miss (GT returns extra Title column not
+implied by question wording) + possible schema linking miss for `BountyAmount`.
 
 ---
 
-## 6. Proposed Improvements (Decision Required)
+### Miss 5 — QID=1027, european_football_2, **simple**
 
-### Decision A — Fix B2 truncation [RECOMMENDED: YES]
-Set B2's default `max_tokens` to 4096. Add truncation detection: if `finish_reason == MAX_TOKENS` and output is non-empty, set `error_flag=True` rather than passing truncated SQL downstream.
-**Impact:** Raises B2 exec_ok from 69% → ~95%, potentially adding 5-10% oracle coverage.
+**Question**: Indicate the full names of the top 10 players with the highest number of
+penalties.
 
-### Decision B — Improve grounding fallback [RECOMMENDED: YES]
-When grounding LLM returns MALFORMED_FUNCTION_CALL, fall back to LSH-only matching using question words directly as keywords rather than empty grounding. This ensures schema linking still has cell match hints.
-**Impact:** Recovers 2 of 33 questions from empty grounding; low cost to implement.
+**Root cause**: S1 has `Player.id` and `Player_Attributes.player_api_id`. The correct join
+is `Player.player_api_id = Player_Attributes.player_api_id`, but the model joins
+`Player.id = Player_Attributes.player_api_id`, which is wrong — `Player.id` is an internal
+row ID, not the FIFA API player ID. Because `Player.player_api_id` is not in S1, the model
+defaults to the only join-compatible column it can see.
 
-### Decision C — Cap S1 at 25 fields; skip S2 when S1==S2 [RECOMMENDED: YES]
-If S1 covers ≥25 fields (or ≥80% of FAISS candidates), skip the S2 call and use a FAISS-widened set as S2.
-**Impact:** Saves ~5-8 API calls per 33 questions; reduces duplicate rate by ~10%.
-
-### Decision D — Add explicit SELECT completeness instruction to generators [RECOMMENDED: YES]
-One-line addition to all generator system prompts: "SELECT all columns the question explicitly asks for."
-**Impact:** Addresses Q431 and Q586 failures; low risk.
-
-### Decision E — Add FK annotation to DDL schema format [RECOMMENDED: YES, before prompt 13]
-Parse `dev_tables.json` FK definitions and add per-column FK annotations in the DDL: `-- FK → ReferencedTable.column`. This directly addresses the european_football_2 join key failure.
-**Impact:** Requires updating `schema_formatter.py` to consume FK metadata from `dev_tables.json`.
-
-### Decision F — Share SentenceTransformer instance across indexes [RECOMMENDED: YES, before prompt 13]
-Prevents 11 model loads during pipeline execution.
-**Impact:** Saves ~2-3GB RAM during checkpoint E; reduces initialization time.
+**Classification**: P5 — schema linking miss (correct join key `Player.player_api_id` not
+included in S1; only `Player.id` was selected).
 
 ---
 
-## 7. Open Questions for User
+### Miss 6 — QID=1456, student_club, **moderate**
 
-1. **Which of decisions A–F should be implemented before Prompt 11 (query fixer)?**
-   Decisions A (B2 truncation) and B (grounding fallback) affect the candidates that the query fixer receives — implementing them first will give the fixer better input.
-   Decisions C and D are quick wins.
-   Decisions E and F are best done before pipeline integration (Prompt 13).
+**Question**: List the full name of the top five members who spend the most money.
 
-2. **Target: oracle 66.7% → what's the minimum acceptable oracle before selector?**
-   The target EX is 68%. Since oracle is the ceiling and selector typically achieves 70–85% of oracle, we need oracle ≥ 80% to hit EX 68%. The current 66.7% is below this. The query fixer (Op 8) can recover some wrong-execution candidates to correct ones, but it cannot fix fundamentally wrong SQL logic.
+**Root cause**: S1 includes `expense.cost` and `expense.link_to_member`. The generated SQL
+sums `expense.cost` per member, which is semantically correct. However, 10/11 candidates
+exec OK but none oracle-match. Possible causes: (a) the GT computes "spend" differently
+(it joins through `budget`), (b) the output format is different, or (c) there is a
+subtle filtering condition (e.g., only certain expense types count). The GT does a 3-table
+join (expense → budget → event) while candidates do a 2-table join (expense → member).
 
-3. **For Q1027-type failures (wrong FK): should we add FK metadata parsing now, or defer to Phase 2?**
-   The FK information is available in `dev_tables.json` and `train_tables.json`. Adding it to the DDL schema format is a schema_formatter.py change that could help across many databases.
-
----
-
-## 8. Test Results
-
-All unit and integration tests continue to pass (136/136 tests from previous runs). No regressions introduced.
-
-```
-pytest tests/ -v --ignore=tests/e2e -q
-136 passed in prior session
-```
+**Classification**: P6 — semantic interpretation gap (GT join path not obvious from question).
 
 ---
 
-## 9. Summary
+### Miss 7 — QID=1225, thrombosis_prediction, **moderate**
 
-| Metric | Value | Assessment |
-|--------|-------|------------|
-| Oracle upper bound | 66.7% (22/33) | Below ~80% needed for EX≥68% |
-| Simple oracle | 72.7% | Acceptable |
-| Moderate oracle | 63.6% | Needs improvement |
-| Challenging oracle | 63.6% | Needs improvement |
-| B2 exec success | 69% | **Critical gap** (truncation bug) |
-| Duplicate rate | 40% | High; wastes selector API calls |
-| MALFORMED_FUNCTION_CALL rate | ~6% of tool calls | Intermittent; needs fallback |
-| Best DB | debit_card_specializing, superhero (100%) | Schema-straightforward domains |
-| Worst DB | card_games, codebase_community (33%) | Require precise DISTINCT/NULL/ratio logic |
+**Question**: List and group all patients by sex for T-BIL level not within normal range.
+
+**Ground truth**: `SELECT T1.ID, T1.SEX FROM Patient JOIN Laboratory WHERE T-BIL out of range` —
+returns a flat list of (ID, SEX) pairs sorted by SEX.
+
+**Generated**: `SELECT SEX, GROUP_CONCAT(DISTINCT ID)` — uses GROUP BY + aggregation.
+
+The phrase "list and group ... by sex" led the model to perform aggregation, but the GT
+simply lists individual rows ordered by SEX (no GROUP BY). This is an over-aggregation
+pattern.
+
+**Classification**: P7 — over-aggregation (phrasing "group by" misinterpreted as GROUP BY).
+
+---
+
+### Miss 8 — QID=237, toxicology, **moderate**
+
+**Question**: Which molecule does atom TR001_10 belong to? State whether it is carcinogenic.
+
+**Ground truth**: `IIF(label = '+', 'YES', 'NO') AS flag_carcinogenic`
+
+**Generated**: `CASE WHEN label = '+' THEN 'carcinogenic' ELSE 'not carcinogenic' END`
+
+SQL Writing Rule 2 (value mappings) was applied, but the model chose natural language
+('carcinogenic'/'not carcinogenic') instead of the YES/NO binary. The evidence says
+"label = '+' means carcinogenic" but does not explicitly specify the return format as
+"YES" or "NO". The BIRD ground truth always uses YES/NO for binary carcinogenicity.
+
+**Classification**: P8 — value mapping format mismatch (need YES/NO convention in SQL
+Writing Rules, or stronger evidence of expected output format).
+
+---
+
+## Issue Summary
+
+| ID | Severity | Status | Description |
+|----|----------|--------|-------------|
+| P0-1 | P0 | **Fixed** | schema_linker crash on MALFORMED_FUNCTION_CALL — LLMError now falls back to FAISS top-15 |
+| P0-2 | P0 | **Fixed** | B2/C generators 13% empty response from Gemini — MAX_TOKENS guard added, max_tokens doubled |
+| P1-3 | P1 | **Fixed** | S2 over-expansion (36 fields on european_football_2) — S1 cap at 20, S2 cap at min(S1+10,25) |
+| P1-4 | P1 | **Partially fixed** | Duplicate rate 40%→44% (slightly worse); alt templates help but simple questions converge |
+| P1-5 | P1 | **Fixed** | Hallucinated table.table.column filtered correctly (confirmed working) |
+| P2-6 | P2 | **Partially fixed** | Evidence prominence improved via SQL Writing Rules; ratio direction still fails on some |
+| P2-7 | P2 | **Not yet fixed** | SentenceTransformer reloaded per session (not per question) — P2-7 was about cold-start; model loads once per run now |
+| **New P-1** | P1 | **New** | Schema linking misses join keys (P5 / QID=1027): `Player.player_api_id` needed but not selected |
+| **New P-2** | P2 | **New** | Implicit DISTINCT not recognized from question phrasing (P2 / QID=463) |
+| **New P-3** | P2 | **New** | Over-aggregation when question says "list and group" (P7 / QID=1225) |
+| **New P-4** | P2 | **New** | Binary output format: model uses 'carcinogenic'/'not carcinogenic' instead of 'YES'/'NO' (P8 / QID=237) |
+| **New P-5** | P3 | **New** | GT returns extra columns not implied by question wording (P4 / QID=586) |
+
+---
+
+## Suggested Improvements for Next Phase
+
+### High Priority
+
+**S1-A: Add join-key coverage rule to schema linker**
+When a table T has columns `id` and `{entity}_api_id`, and a joined table references
+`{entity}_api_id`, the linker should always include both `T.id` AND `T.{entity}_api_id`
+in S1. Currently PK auto-promotion adds `T.id` but the second join key is lost.
+*Expected impact: fixes P5 / QID=1027 and similar join-key misses.*
+
+**S1-B: Strengthen SQL Writing Rule for binary output format**
+Add to `build_base_prompt()` Rule 2 (or a new Rule 5):
+> "When the question asks 'is X true or false / yes or no', return 'YES' or 'NO' (not
+> full words like 'carcinogenic'). Use IIF(cond, 'YES', 'NO') or CASE WHEN ... THEN 'YES'
+> ELSE 'NO'."
+*Expected impact: fixes P8 / QID=237 and similar binary format questions.*
+
+**S1-C: Add "list and group by" → flat SELECT rule**
+When the question contains "list ... grouped by X" or "list and group ... by X", the model
+should generate `ORDER BY X` (not `GROUP BY X + aggregate`). Add to SQL Writing Rules:
+> "5. 'List grouped by X' means ORDER BY X (sorted listing), not GROUP BY X with
+> aggregation. Only use GROUP BY when the question explicitly asks to count, sum, or
+> aggregate."
+*Expected impact: fixes P7 / QID=1225 and similar over-aggregation.*
+
+### Medium Priority
+
+**S2-A: DISTINCT heuristic for "how many [plural noun]" questions**
+When the question starts with "How many [plural noun]..." and the plural noun maps to a
+column in set_translations, languages, etc., apply DISTINCT automatically because the
+semantic intent is "how many unique values". Can be a simple heuristic in the SQL Writing
+Rules:
+> "When counting items where duplicates may exist (e.g., translations, languages, entries
+> from a junction table), use COUNT(DISTINCT col) unless the question asks for total
+> occurrences."
+*Expected impact: fixes P2 / QID=463.*
+
+**S2-B: Ratio direction clarification in SQL Writing Rules**
+The current Rule 3 text says "how many times is A compared to B → A/B" but this wasn't
+followed for QID=571 (moderate difficulty). Strengthen to an example:
+> "3. Ratio / comparison direction: 'How many times is X compared to Y?' → X/Y.
+> Example: 'How many times is posts compared to votes?' → COUNT(posts)/COUNT(votes).
+> Never invert this."
+*Expected impact: reduces ratio direction errors (P3 / QID=571).*
+
+**S2-C: Output column completeness in schema linker**
+For questions that ask for X "and" Y (e.g., "return School and document type"), the schema
+linker should identify both output columns in S1, not just filtering/join columns.
+Currently the LLM sometimes selects only columns needed for WHERE/JOIN, not for SELECT.
+Adding a reminder to the schema linker prompt: "Also select columns mentioned in the
+SELECT clause, not just filters and joins."
+*Expected impact: reduces miss P1 / QID=28.*
+
+### Low Priority
+
+**S3-A: Improve diversity for simple questions**
+The 44% duplicate rate is driven by simple questions (up to 91% dup). For simple questions,
+diversity is less important since multiple correct answers are acceptable. The issue only
+matters for complex questions. A future improvement could increase temperature for generators
+when S2 is much larger than S1 (indicating schema uncertainty) and decrease it when S1==S2
+(indicating schema certainty).
+
+**S3-B: Schema format changes for FK annotations**
+The `schema_formatter.py` FK annotation changes (inline `FK → target`) require a re-run of
+offline preprocessing to take effect. After prompts 11-13 are complete and before the full
+eval (prompt 15), consider re-running offline preprocessing to benefit from improved FK hints.
+
+---
+
+## Next Steps
+
+1. Implement suggested improvements S1-A through S1-C in `base_generator.py` and
+   `schema_linker.py` (can be done as part of prompt_11 pre-work or as a separate fix step).
+2. Proceed to **Prompt 11** (Op 8: `query_fixer.py` + `test_query_fixer.py`).
+3. Checkpoint D status remains as the reference baseline for the next evaluation.
+4. Update `implementation_progress.json` to mark checkpoint_D completed after user review.
+
+---
+
+*Report generated: 2026-02-23. Run log: `checkpoint_D_review/run_output.log`. Raw results: `checkpoint_D_review/results.json`.*

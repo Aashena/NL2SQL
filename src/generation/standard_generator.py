@@ -92,7 +92,7 @@ class StandardAndComplexGenerator:
         b2_s2_template = _B2_ALT_SYSTEM_TEMPLATE if s1_eq_s2 else _B2_SYSTEM_TEMPLATE
 
         tasks = [
-            # B1: standard prompt, fast model — 2000 tokens is sufficient
+            # B1: standard prompt, fast model — temperature=0.3 for slight variation while reducing duplicates
             self._generate_one(
                 candidate_id="standard_B1_s1",
                 schema_used="s1",
@@ -100,7 +100,8 @@ class StandardAndComplexGenerator:
                 system_template=_B1_SYSTEM_TEMPLATE,
                 model=settings.model_fast,
                 user_prompt=user_prompt,
-                max_tokens=2000,
+                max_tokens=4096,
+                temperature=0.3,
             ),
             self._generate_one(
                 candidate_id="standard_B1_s2",
@@ -109,9 +110,11 @@ class StandardAndComplexGenerator:
                 system_template=b1_s2_template,
                 model=settings.model_fast,
                 user_prompt=user_prompt,
-                max_tokens=2000,
+                max_tokens=4096,
+                temperature=0.3,
             ),
             # B2: complex SQL prompt, powerful model — 4096 tokens to avoid MAX_TOKENS truncation
+            # temperature=0.3 for slight variation while remaining close to deterministic
             self._generate_one(
                 candidate_id="complex_B2_s1",
                 schema_used="s1",
@@ -120,6 +123,7 @@ class StandardAndComplexGenerator:
                 model=settings.model_powerful,
                 user_prompt=user_prompt,
                 max_tokens=4096,
+                temperature=0.3,
             ),
             self._generate_one(
                 candidate_id="complex_B2_s2",
@@ -129,6 +133,7 @@ class StandardAndComplexGenerator:
                 model=settings.model_powerful,
                 user_prompt=user_prompt,
                 max_tokens=4096,
+                temperature=0.3,
             ),
         ]
 
@@ -144,6 +149,7 @@ class StandardAndComplexGenerator:
         model: str,
         user_prompt: str,
         max_tokens: int = 2000,
+        temperature: float = 1.0,
     ) -> SQLCandidate:
         """Generate a single candidate using the given model and system template."""
         system_text = system_template.format(markdown_schema=markdown_schema)
@@ -159,6 +165,7 @@ class StandardAndComplexGenerator:
                 tool_choice_name=None,
                 thinking=None,
                 max_tokens=max_tokens,
+                temperature=temperature,
             )
         except Exception as exc:
             logger.error(
@@ -174,6 +181,26 @@ class StandardAndComplexGenerator:
             )
 
         raw_text = response.text
+
+        # Detect and discard truncated responses: finish_reason=MAX_TOKENS with
+        # partial text means the SQL was cut off mid-statement.  A truncated SQL
+        # always fails SQLite with "incomplete input"; better to mark error_flag
+        # than to pass broken SQL to the query fixer.
+        if "MAX_TOKENS" in str(response.finish_reason):
+            logger.warning(
+                "StandardAndComplexGenerator %s: response truncated at MAX_TOKENS "
+                "(partial text discarded)",
+                candidate_id,
+            )
+            return SQLCandidate(
+                sql="",
+                generator_id=candidate_id,
+                schema_used=schema_used,
+                schema_format="markdown",
+                reasoning_trace=None,
+                error_flag=True,
+            )
+
         if raw_text is None:
             logger.warning(
                 "StandardAndComplexGenerator %s: response.text is None", candidate_id

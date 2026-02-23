@@ -522,7 +522,8 @@ async def link_schema(
         f"Question: {question}\n"
         f"Evidence: {evidence_str}\n"
         f"Matched values:\n{formatted_cells}\n\n"
-        "Select only columns DEFINITELY needed to answer this question."
+        "Select only columns DEFINITELY needed to answer this question. "
+        "Select at most 20 of the most relevant fields."
     )
 
     client = get_client()
@@ -612,6 +613,24 @@ async def link_schema(
                     s1_extended.add(key)
 
     # ------------------------------------------------------------------
+    # Hard cap: S₁ must not exceed 20 fields to prevent schema bloat
+    # on large-schema databases.  Trim by FAISS rank; PK/FK columns
+    # for non-ranked tables come last.
+    # ------------------------------------------------------------------
+    _S1_MAX_FIELDS = 20
+    if len(s1_extended) > _S1_MAX_FIELDS:
+        candidate_keys_ordered = [(t, c) for t, c, _ss, _ls in candidates]
+        candidate_key_set = set(candidate_keys_ordered)
+        s1_ranked = [k for k in candidate_keys_ordered if k in s1_extended]
+        s1_unranked = [k for k in s1_extended if k not in candidate_key_set]
+        s1_extended = set((s1_ranked + s1_unranked)[:_S1_MAX_FIELDS])
+        logger.debug(
+            "S1 capped to %d fields (hard cap=%d)",
+            len(s1_extended),
+            _S1_MAX_FIELDS,
+        )
+
+    # ------------------------------------------------------------------
     # Step 6.3 — Iteration 2: Recall Expansion (S₂)
     # ------------------------------------------------------------------
     # Show remaining candidates (not already in S₁ extended)
@@ -620,7 +639,34 @@ async def link_schema(
         if (t, c) not in s1_extended
     ]
 
-    if remaining_candidates:
+    # Compute S₁ coverage over the full FAISS candidate set.
+    # Skip the S₂ LLM call when it would provide little or no new signal:
+    #   • total_candidates == 0  → FAISS returned nothing; nothing to expand
+    #   • remaining == 0         → S₁ already consumed every candidate
+    #   • s1_coverage >= 0.80   → S₁ covers ≥80% of FAISS candidates;
+    #                              only a marginal tail remains
+    #   • len(remaining) < 3    → fewer than 3 new fields; not worth a call
+    total_candidates = len(candidates)
+    s1_coverage = len(s1_extended) / max(total_candidates, 1)
+    few_remaining = len(remaining_candidates) < 3
+
+    skip_s2 = (
+        total_candidates == 0
+        or len(remaining_candidates) == 0
+        or s1_coverage >= 0.80
+        or few_remaining
+    )
+
+    if skip_s2:
+        logger.debug(
+            "Skipping S2 expansion: S1 covers %.0f%% of %d candidates "
+            "(%d remaining)",
+            s1_coverage * 100,
+            total_candidates,
+            len(remaining_candidates),
+        )
+        s2_extended = set(s1_extended)
+    else:
         remaining_lines = [
             f"Table: {t} | Column: {c} | {ss}" for t, c, ss, _ls in remaining_candidates
         ]
@@ -673,32 +719,6 @@ async def link_schema(
         s2_combined = s1_extended | s2_new
         s2_tables = {t for t, _c in s2_combined}
         s2_extended = _add_pk_fk_for_tables(s2_combined, s2_tables)
-    else:
-        # No remaining candidates — S₂ = S₁
-        s2_extended = set(s1_extended)
-        # Still make a second API call (spec: exactly 2 calls)
-        system_block_2_empty = CacheableText(
-            text="Candidate fields:\n(no additional candidates)",
-            cache=True,
-        )
-        user_msg_s2_empty = (
-            f"Question: {question}\n"
-            f"Evidence: {evidence_str}\n\n"
-            "No additional candidate fields available. "
-            "Return an empty selected_fields list."
-        )
-        try:
-            _response_s2_empty = await client.generate(
-                model=settings.model_powerful,
-                system=[system_block_1, system_block_2_empty],
-                messages=[{"role": "user", "content": user_msg_s2_empty}],
-                tools=[_SELECT_COLUMNS_TOOL],
-                tool_choice_name="select_columns",
-                max_tokens=200,
-                temperature=0.0,
-            )
-        except LLMError as exc:
-            logger.warning("Schema linker S2 (empty-candidates) call failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Enforce S₁ ⊆ S₂ invariant

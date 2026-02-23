@@ -25,6 +25,64 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Stop words for keyword fallback (used when LLM extraction fails)
+# ---------------------------------------------------------------------------
+
+_STOP_WORDS: frozenset[str] = frozenset({
+    "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "shall", "can", "for", "of", "in", "on",
+    "at", "to", "by", "with", "from", "and", "or", "not", "no", "nor",
+    "but", "if", "then", "than", "as", "its", "it", "this", "that",
+    "these", "those", "what", "which", "who", "how", "when", "where",
+    "why", "whose", "whom",
+})
+
+# ---------------------------------------------------------------------------
+# Keyword extraction helper (used as LLM fallback)
+# ---------------------------------------------------------------------------
+
+def _extract_keywords_from_text(text: str) -> list[str]:
+    """
+    Extract meaningful keywords from *text* using simple NLP.
+
+    This is used as a fallback when the LLM structured extraction fails
+    (e.g. MALFORMED_FUNCTION_CALL from Gemini on long or special-char inputs).
+    It preserves original-case tokens so that LSH matching can perform
+    case-insensitive 3-gram comparisons against indexed cell values.
+
+    Steps:
+    1. Split on whitespace.
+    2. Strip leading/trailing punctuation from each token.
+    3. Filter tokens that are stop words (checked lowercased).
+    4. Filter tokens shorter than 3 characters.
+    5. Deduplicate while preserving the first-seen order.
+    """
+    # Split on whitespace first; each chunk may still have punctuation attached.
+    raw_tokens = text.split()
+
+    seen: set[str] = set()
+    keywords: list[str] = []
+    for tok in raw_tokens:
+        # Strip punctuation from both ends of the token.
+        stripped = tok.strip(".,;:!?'\"()[]{}\\`")
+        if not stripped:
+            continue
+        # Use lowercase only for stop-word and length checks; keep original case
+        # for the LSH query so that exact-match detection works correctly.
+        lower = stripped.lower()
+        if lower in _STOP_WORDS:
+            continue
+        if len(stripped) < 3:
+            continue
+        if lower not in seen:
+            seen.add(lower)
+            keywords.append(stripped)
+
+    return keywords
+
+
+# ---------------------------------------------------------------------------
 # Tool definition for keyword/literal extraction (Step 5.1)
 # ---------------------------------------------------------------------------
 
@@ -131,14 +189,22 @@ async def ground_context(
             schema_references = []
     except LLMError as exc:
         # Gemini occasionally returns MALFORMED_FUNCTION_CALL for complex inputs
-        # (e.g. dates with forward slashes, special characters). Fall back to
-        # empty grounding rather than crashing the entire question pipeline.
+        # (e.g. backtick-quoted column names, long evidence with special characters).
+        # Instead of falling back to completely empty grounding (which leaves the
+        # LSH index entirely unused), extract keywords directly from the raw text
+        # and use those as literals for LSH lookup.  This ensures the schema linker
+        # and SQL generators still receive cell-value anchors even when the
+        # structured LLM extraction fails.
+        combined_text = f"{question} {evidence_str}"
+        fallback_literals = _extract_keywords_from_text(combined_text)
         logger.warning(
-            "Grounding LLM error for question %r — falling back to empty grounding: %s",
+            "Grounding LLM error for question %r — falling back to keyword extraction "
+            "(%d tokens extracted): %s",
             question[:60],
+            len(fallback_literals),
             exc,
         )
-        literals = []
+        literals = fallback_literals
         schema_references = []
 
     logger.debug(

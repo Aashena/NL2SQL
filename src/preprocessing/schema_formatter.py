@@ -110,6 +110,15 @@ def _format_ddl_table(
         long_summary = fs.long_summary if fs else ""
         truncated_summary = _truncate(long_summary, _LONG_SUMMARY_MAX)
 
+        # Append inline FK annotation so LLMs see the join target on the same line
+        # as the column definition — not just in the footer comment block.
+        if col.foreign_key_ref is not None:
+            fk_annotation = f"FK → {col.foreign_key_ref}"
+            if truncated_summary:
+                truncated_summary = f"{truncated_summary} | {fk_annotation}"
+            else:
+                truncated_summary = fk_annotation
+
         quoted_name = _quote_col(col.column_name)
         pk_clause = " PRIMARY KEY" if col.is_primary_key else ""
 
@@ -233,7 +242,8 @@ def _format_markdown_table(
         if col.is_primary_key:
             type_str += " (PK)"
         if col.foreign_key_ref is not None:
-            type_str += " (FK)"
+            # Include target table+column so LLMs know exactly where the FK points
+            type_str += f" (FK→{col.foreign_key_ref})"
 
         # Description cell
         description_cell = (
