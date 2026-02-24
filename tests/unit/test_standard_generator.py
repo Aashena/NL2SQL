@@ -184,13 +184,13 @@ async def test_b2_uses_powerful_model(schemas, grounding):
     b2_candidates = [c for c in candidates if "B2" in c.generator_id]
     assert len(b2_candidates) == 2, f"Expected 2 B2 candidates, got {len(b2_candidates)}"
 
-    # Find the calls made with the powerful model
+    # Find the calls made with the powerful model list
     powerful_model_calls = [
         ca for ca in call_args_list
-        if ca.kwargs.get("model") == settings.model_powerful
+        if ca.kwargs.get("model") == settings.model_powerful_list
     ]
     assert len(powerful_model_calls) == 2, (
-        f"Expected 2 calls with model_powerful={settings.model_powerful!r}, "
+        f"Expected 2 calls with model_powerful_list={settings.model_powerful_list!r}, "
         f"got {len(powerful_model_calls)}"
     )
 
@@ -351,10 +351,10 @@ async def test_b2_system_prompt_mentions_cte(schemas, grounding):
         )
 
     call_args_list = mock_client.generate.call_args_list
-    # B2 calls should be the last 2 (indices 2 and 3), using model_powerful
+    # B2 calls should be the last 2 (indices 2 and 3), using model_powerful_list
     b2_calls = [
         ca for ca in call_args_list
-        if ca.kwargs.get("model") == settings.model_powerful
+        if ca.kwargs.get("model") == settings.model_powerful_list
     ]
     assert len(b2_calls) == 2, f"Expected 2 B2 calls, got {len(b2_calls)}"
 

@@ -20,7 +20,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
-from src.llm import get_client, CacheableText, LLMError, ToolParam
+from src.llm import get_client, CacheableText, LLMError, ToolParam, sanitize_prompt_text
 from src.config.settings import settings
 
 if TYPE_CHECKING:
@@ -53,8 +53,13 @@ _SELECT_COLUMNS_TOOL = ToolParam(
                         "table": {"type": "string"},
                         "column": {"type": "string"},
                         "reason": {"type": "string"},
+                        "role": {
+                            "type": "string",
+                            "enum": ["select", "where", "join", "group_by", "order_by"],
+                            "description": "The SQL clause this column primarily serves",
+                        },
                     },
-                    "required": ["table", "column", "reason"],
+                    "required": ["table", "column", "reason", "role"],
                 },
             }
         },
@@ -454,6 +459,19 @@ async def link_schema(
     """
     evidence_str = evidence if evidence else "None"
 
+    # Sanitize question and evidence before embedding in tool-use prompts.
+    # Gemini's function-call parser fails on backtick-quoted identifiers,
+    # control characters, and very long evidence blocks (100+ tokens).
+    safe_question = sanitize_prompt_text(question)
+    safe_evidence = sanitize_prompt_text(evidence_str)
+    _MAX_EVIDENCE_CHARS = 500  # ~125 tokens; enough for all normal evidence strings
+    if len(safe_evidence) > _MAX_EVIDENCE_CHARS:
+        logger.debug(
+            "Truncating evidence from %d to %d chars in schema linker prompt",
+            len(safe_evidence), _MAX_EVIDENCE_CHARS,
+        )
+        safe_evidence = safe_evidence[:_MAX_EVIDENCE_CHARS] + "..."
+
     # Build lookup structures
     available_field_set: set[tuple[str, str]] = {
         (t, c) for t, c, _ss, _ls in available_fields
@@ -465,7 +483,18 @@ async def link_schema(
     # ------------------------------------------------------------------
     # Step 6.1 — FAISS pre-filtering + schema-hint augmentation
     # ------------------------------------------------------------------
-    faiss_results: list["FieldMatch"] = faiss_index.query(question, top_k=settings.faiss_top_k)
+    # Catch OSError (includes BrokenPipeError) from SentenceTransformer model
+    # load writing to a broken stdout/stderr pipe. Log as CRITICAL; fall back
+    # to an empty candidate list so the S1/S2 LLM calls use full DDL context.
+    try:
+        faiss_results: list["FieldMatch"] = faiss_index.query(question, top_k=settings.faiss_top_k)
+    except OSError as exc:
+        logger.critical(
+            "FAISS pre-filter query OS error (broken pipe?): %s — "
+            "falling back to empty candidate list",
+            exc,
+        )
+        faiss_results = []
 
     seen_keys: set[tuple[str, str]] = set()
     candidates: list[tuple[str, str, str, str]] = []  # (table, col, short, long)
@@ -519,30 +548,47 @@ async def link_schema(
     # Step 6.2 — Iteration 1: Precise Selection (S₁)
     # ------------------------------------------------------------------
     user_msg_s1 = (
-        f"Question: {question}\n"
-        f"Evidence: {evidence_str}\n"
+        f"Question: {safe_question}\n"
+        f"Evidence: {safe_evidence}\n"
         f"Matched values:\n{formatted_cells}\n\n"
-        "Select only columns DEFINITELY needed to answer this question."
+        "Select only columns DEFINITELY needed to answer this question. "
+        "Select at most 20 of the most relevant fields. "
+        "Also include columns that will appear in the SELECT clause "
+        "(output columns the question asks to return), not only columns "
+        "needed for WHERE conditions and JOINs. "
+        "For each column, set 'role' to the SQL clause it primarily serves "
+        "(select, where, join, group_by, or order_by)."
     )
 
     client = get_client()
     try:
         response_s1 = await client.generate(
-            model=settings.model_powerful,
+            model=settings.model_powerful_list,
             system=[system_block_1, system_block_2],
             messages=[{"role": "user", "content": user_msg_s1}],
             tools=[_SELECT_COLUMNS_TOOL],
             tool_choice_name="select_columns",
-            max_tokens=2000,
+            max_tokens=8192,
             temperature=0.0,
         )
-        s1_raw: list[dict] = response_s1.tool_inputs[0].get("selected_fields", []) if response_s1.tool_inputs else []
+        if response_s1.tool_inputs:
+            raw_s1 = response_s1.tool_inputs[0].get("selected_fields", [])
+            if not isinstance(raw_s1, list):
+                logger.warning(
+                    "Schema linker S1: 'selected_fields' is not a list (%r); treating as empty",
+                    type(raw_s1).__name__,
+                )
+                raw_s1 = []
+            s1_raw: list[dict] = [f for f in raw_s1 if isinstance(f, dict)]
+        else:
+            logger.warning("Schema linker S1: no tool_inputs in response; using FAISS fallback")
+            s1_raw = []
     except LLMError as exc:
         logger.error(
             "Schema linker S1 LLM call failed (%s); falling back to FAISS top-15 as S1.", exc
         )
         s1_raw = [
-            {"table": t, "column": c, "reason": "FAISS-rank-fallback"}
+            {"table": t, "column": c, "reason": "FAISS-rank-fallback", "role": "where"}
             for t, c, _ss, _ls in candidates[:15]
         ]
 
@@ -553,10 +599,12 @@ async def link_schema(
         t = item.get("table", "")
         c = item.get("column", "")
         r = item.get("reason", "")
+        role = item.get("role", "")
         key = (t, c)
         if key in available_field_set:
             s1_selected.add(key)
-            s1_reasons.append(f"{t}.{c}: {r}")
+            role_tag = f"[{role}] " if role else ""
+            s1_reasons.append(f"{role_tag}{t}.{c}: {r}")
         else:
             logger.warning(
                 "Hallucinated field filtered out from S₁: %s.%s", t, c
@@ -579,13 +627,25 @@ async def link_schema(
                 pk_key = (table, pk_col)
                 if pk_key in available_field_set:
                     result.add(pk_key)
-        # Add FK columns that reference already-selected or PK-bearing tables
+        # Add FK columns and their referenced target columns for tables in S1.
+        # "FK closure": for every FK where both from_table and to_table are
+        # already selected, add both the FK column (from_col) AND the target
+        # column (to_col).  This handles non-PK join targets like
+        # Player.player_api_id which PK auto-promotion alone would miss.
         selected_tables = {t for t, _c in result}
         for table in list(selected_tables):
             for local_col, ref_str in fk_map.get(table, []):
+                # (1) always add the FK column itself
                 fk_key = (table, local_col)
                 if fk_key in available_field_set:
                     result.add(fk_key)
+                # (2) add the referenced column when its table is already selected
+                m = re.match(r"(\S+)\((\S+)\)", ref_str)  # e.g. "Player(player_api_id)"
+                if m:
+                    ref_table, ref_col = m.group(1), m.group(2)
+                    ref_key = (ref_table, ref_col)
+                    if ref_table in selected_tables and ref_key in available_field_set:
+                        result.add(ref_key)
         return result
 
     s1_tables = {t for t, _c in s1_selected}
@@ -600,7 +660,15 @@ async def link_schema(
     # is large or if the column name is ambiguous.
     _HIGH_CONF_S1_THRESHOLD = 0.8
     for hint in grounding_context.schema_hints:
-        hint_results = faiss_index.query(hint, top_k=3)
+        try:
+            hint_results = faiss_index.query(hint, top_k=3)
+        except OSError as exc:
+            logger.critical(
+                "FAISS hint query OS error (broken pipe?): %s — skipping hint %r",
+                exc,
+                hint,
+            )
+            continue
         for fm in hint_results:
             if fm.similarity_score >= _HIGH_CONF_S1_THRESHOLD:
                 key = (fm.table, fm.column)
@@ -612,6 +680,24 @@ async def link_schema(
                     s1_extended.add(key)
 
     # ------------------------------------------------------------------
+    # Hard cap: S₁ must not exceed 20 fields to prevent schema bloat
+    # on large-schema databases.  Trim by FAISS rank; PK/FK columns
+    # for non-ranked tables come last.
+    # ------------------------------------------------------------------
+    _S1_MAX_FIELDS = 20
+    if len(s1_extended) > _S1_MAX_FIELDS:
+        candidate_keys_ordered = [(t, c) for t, c, _ss, _ls in candidates]
+        candidate_key_set = set(candidate_keys_ordered)
+        s1_ranked = [k for k in candidate_keys_ordered if k in s1_extended]
+        s1_unranked = [k for k in s1_extended if k not in candidate_key_set]
+        s1_extended = set((s1_ranked + s1_unranked)[:_S1_MAX_FIELDS])
+        logger.debug(
+            "S1 capped to %d fields (hard cap=%d)",
+            len(s1_extended),
+            _S1_MAX_FIELDS,
+        )
+
+    # ------------------------------------------------------------------
     # Step 6.3 — Iteration 2: Recall Expansion (S₂)
     # ------------------------------------------------------------------
     # Show remaining candidates (not already in S₁ extended)
@@ -620,7 +706,34 @@ async def link_schema(
         if (t, c) not in s1_extended
     ]
 
-    if remaining_candidates:
+    # Compute S₁ coverage over the full FAISS candidate set.
+    # Skip the S₂ LLM call when it would provide little or no new signal:
+    #   • total_candidates == 0  → FAISS returned nothing; nothing to expand
+    #   • remaining == 0         → S₁ already consumed every candidate
+    #   • s1_coverage >= 0.80   → S₁ covers ≥80% of FAISS candidates;
+    #                              only a marginal tail remains
+    #   • len(remaining) < 3    → fewer than 3 new fields; not worth a call
+    total_candidates = len(candidates)
+    s1_coverage = len(s1_extended) / max(total_candidates, 1)
+    few_remaining = len(remaining_candidates) < 3
+
+    skip_s2 = (
+        total_candidates == 0
+        or len(remaining_candidates) == 0
+        or s1_coverage >= 0.80
+        or few_remaining
+    )
+
+    if skip_s2:
+        logger.debug(
+            "Skipping S2 expansion: S1 covers %.0f%% of %d candidates "
+            "(%d remaining)",
+            s1_coverage * 100,
+            total_candidates,
+            len(remaining_candidates),
+        )
+        s2_extended = set(s1_extended)
+    else:
         remaining_lines = [
             f"Table: {t} | Column: {c} | {ss}" for t, c, ss, _ls in remaining_candidates
         ]
@@ -630,24 +743,39 @@ async def link_schema(
         )
 
         user_msg_s2 = (
-            f"Question: {question}\n"
-            f"Evidence: {evidence_str}\n"
+            f"Question: {safe_question}\n"
+            f"Evidence: {safe_evidence}\n"
             f"Matched values:\n{formatted_cells}\n\n"
             "Select columns that MIGHT be needed to answer this question "
-            "(cast a wider net — include columns that could be relevant)."
+            "(cast a wider net — include columns that could be relevant). "
+            "Also include output columns (SELECT clause) that the question asks "
+            "to return, not only columns needed for WHERE conditions and JOINs. "
+            "For each column, set 'role' to the SQL clause it primarily serves "
+            "(select, where, join, group_by, or order_by)."
         )
 
         try:
             response_s2 = await client.generate(
-                model=settings.model_powerful,
+                model=settings.model_powerful_list,
                 system=[system_block_1, system_block_2_remaining],
                 messages=[{"role": "user", "content": user_msg_s2}],
                 tools=[_SELECT_COLUMNS_TOOL],
                 tool_choice_name="select_columns",
-                max_tokens=2000,
+                max_tokens=8192,
                 temperature=0.0,
             )
-            s2_raw: list[dict] = response_s2.tool_inputs[0].get("selected_fields", []) if response_s2.tool_inputs else []
+            if response_s2.tool_inputs:
+                raw_s2 = response_s2.tool_inputs[0].get("selected_fields", [])
+                if not isinstance(raw_s2, list):
+                    logger.warning(
+                        "Schema linker S2: 'selected_fields' is not a list (%r); treating as empty",
+                        type(raw_s2).__name__,
+                    )
+                    raw_s2 = []
+                s2_raw: list[dict] = [f for f in raw_s2 if isinstance(f, dict)]
+            else:
+                logger.warning("Schema linker S2: no tool_inputs in response; using S1 as S2")
+                s2_raw = []
         except LLMError as exc:
             logger.error(
                 "Schema linker S2 LLM call failed (%s); using S1 as S2 fallback.", exc
@@ -659,11 +787,12 @@ async def link_schema(
             t = item.get("table", "")
             c = item.get("column", "")
             r = item.get("reason", "")
+            role = item.get("role", "")
             key = (t, c)
             if key in available_field_set:
                 s2_new.add(key)
-                s2_reasons_item = f"{t}.{c}: {r}"
-                s1_reasons.append(s2_reasons_item)
+                role_tag = f"[{role}] " if role else ""
+                s1_reasons.append(f"{role_tag}{t}.{c}: {r}")
             else:
                 logger.warning(
                     "Hallucinated field filtered out from S₂: %s.%s", t, c
@@ -673,32 +802,6 @@ async def link_schema(
         s2_combined = s1_extended | s2_new
         s2_tables = {t for t, _c in s2_combined}
         s2_extended = _add_pk_fk_for_tables(s2_combined, s2_tables)
-    else:
-        # No remaining candidates — S₂ = S₁
-        s2_extended = set(s1_extended)
-        # Still make a second API call (spec: exactly 2 calls)
-        system_block_2_empty = CacheableText(
-            text="Candidate fields:\n(no additional candidates)",
-            cache=True,
-        )
-        user_msg_s2_empty = (
-            f"Question: {question}\n"
-            f"Evidence: {evidence_str}\n\n"
-            "No additional candidate fields available. "
-            "Return an empty selected_fields list."
-        )
-        try:
-            _response_s2_empty = await client.generate(
-                model=settings.model_powerful,
-                system=[system_block_1, system_block_2_empty],
-                messages=[{"role": "user", "content": user_msg_s2_empty}],
-                tools=[_SELECT_COLUMNS_TOOL],
-                tool_choice_name="select_columns",
-                max_tokens=200,
-                temperature=0.0,
-            )
-        except LLMError as exc:
-            logger.warning("Schema linker S2 (empty-candidates) call failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Enforce S₁ ⊆ S₂ invariant

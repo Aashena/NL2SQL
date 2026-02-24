@@ -18,7 +18,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from src.llm.base import CacheableText, LLMClient, LLMError, LLMResponse, ThinkingConfig, ToolParam
+from src.llm.base import CacheableText, LLMClient, LLMError, LLMRateLimitError, LLMResponse, ThinkingConfig, ToolParam
 
 
 class AnthropicClient(LLMClient):
@@ -26,7 +26,7 @@ class AnthropicClient(LLMClient):
     def __init__(self, api_key: str) -> None:
         self._client = anthropic.AsyncAnthropic(api_key=api_key)
 
-    async def generate(
+    async def _generate_single(
         self,
         *,
         model: str,
@@ -64,6 +64,10 @@ class AnthropicClient(LLMClient):
 
         try:
             raw = await self._call_with_retry(**kwargs)
+        except anthropic.RateLimitError as exc:
+            raise LLMRateLimitError(
+                f"Anthropic rate limit after retries (model={model}): {exc}"
+            ) from exc
         except Exception as exc:
             raise LLMError(f"Anthropic API call failed after retries: {exc}") from exc
 

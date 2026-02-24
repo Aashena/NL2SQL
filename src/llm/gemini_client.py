@@ -25,9 +25,21 @@ from tenacity import (
     wait_exponential,
 )
 
-from src.llm.base import CacheableText, LLMClient, LLMError, LLMResponse, ThinkingConfig, ToolParam
+from src.llm.base import CacheableText, LLMClient, LLMError, LLMMalformedToolError, LLMRateLimitError, LLMResponse, ThinkingConfig, ToolParam
 
 logger = logging.getLogger(__name__)
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """Return True if exc is a Gemini quota exhaustion / rate limit error."""
+    try:
+        from google.api_core.exceptions import ResourceExhausted  # type: ignore[import]
+        if isinstance(exc, ResourceExhausted):
+            return True
+    except ImportError:
+        pass
+    s = str(exc).lower()
+    return "resource_exhausted" in s or "429" in s or "quota" in s
 
 
 class GeminiClient(LLMClient):
@@ -48,7 +60,7 @@ class GeminiClient(LLMClient):
         self._semaphore: Optional[asyncio.Semaphore] = None
         self._max_concurrent = int(os.environ.get("GEMINI_MAX_CONCURRENT", "5"))
 
-    async def generate(
+    async def _generate_single(
         self,
         *,
         model: str,
@@ -161,6 +173,10 @@ class GeminiClient(LLMClient):
         except LLMError:
             raise
         except Exception as exc:
+            if _is_rate_limit_error(exc):
+                raise LLMRateLimitError(
+                    f"Gemini rate limit after retries (model={model}): {exc}"
+                ) from exc
             raise LLMError(f"Gemini API call failed after retries: {exc}") from exc
 
     def _get_semaphore(self) -> asyncio.Semaphore:
@@ -253,6 +269,13 @@ def _parse_response(raw: Any) -> LLMResponse:
         )
 
     finish_reason = str(getattr(candidate, "finish_reason", "UNKNOWN"))
+
+    # Detect MALFORMED_FUNCTION_CALL immediately — retrying with the same
+    # prompt will not help; callers should apply prompt simplification instead.
+    if "MALFORMED_FUNCTION_CALL" in finish_reason:
+        raise LLMMalformedToolError(
+            f"Gemini returned MALFORMED_FUNCTION_CALL (finish_reason={finish_reason})"
+        )
 
     for part in (candidate.content.parts or []):
         if hasattr(part, "function_call") and part.function_call:

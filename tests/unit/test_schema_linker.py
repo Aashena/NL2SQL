@@ -452,12 +452,18 @@ async def test_faiss_pre_filtering_top_k(mock_faiss_index, mock_grounding_contex
 
 
 # ---------------------------------------------------------------------------
-# Test 6: Exactly 2 API calls
+# Test 6: 2 API calls when many candidates remain (normal case)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_two_api_calls_made(mock_faiss_index, mock_grounding_context):
-    """Exactly 2 generate() calls must be made (one for S₁, one for S₂)."""
+    """2 generate() calls are made when S₁ covers <80% of FAISS candidates
+    and ≥3 candidates remain — the normal expansion case.
+
+    The default fixture has 15 FAISS candidates; S₁ selects 2 fields which
+    expand to ~4 fields via PK/FK auto-add (coverage ≈26%), leaving 11+
+    remaining candidates — well above the skip threshold.
+    """
     with patch("src.schema_linking.schema_linker.get_client") as mock_get_client:
         mock_client = make_mock_client()
         mock_get_client.return_value = mock_client
@@ -472,7 +478,8 @@ async def test_two_api_calls_made(mock_faiss_index, mock_grounding_context):
         )
 
     assert mock_client.generate.call_count == 2, (
-        f"Expected 2 generate() calls, got {mock_client.generate.call_count}"
+        f"Expected 2 generate() calls (normal expansion case), "
+        f"got {mock_client.generate.call_count}"
     )
 
 
@@ -734,3 +741,317 @@ async def test_all_selected_fields_in_original_schema(mock_faiss_index, mock_gro
     assert ("students", "nonexistent_col") not in result.s1_fields
     assert ("ghost_table", "phantom_col") not in result.s1_fields
     assert ("courses", "fake_field_xyz") not in result.s2_fields
+
+
+# ---------------------------------------------------------------------------
+# Test 13: S2 skipped when S1 already covers ≥80% of candidates (P1-4 fix)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_s2_skipped_when_high_coverage():
+    """Only 1 generate() call when S₁ selects ≥80% of FAISS candidates.
+
+    Scenario: FAISS returns 5 candidates; S₁ LLM selects 4 of them (plus
+    their PK auto-add brings coverage above 80%), so the S₂ LLM call is
+    skipped.  S₂ must equal S₁ in this case.
+    """
+    # 5 FAISS candidates from one table (small schema)
+    small_faiss = MagicMock()
+    small_faiss.query.return_value = [
+        FieldMatch(table="students", column="id",    similarity_score=0.95,
+                   short_summary="Student ID",   long_summary="PK."),
+        FieldMatch(table="students", column="name",  similarity_score=0.90,
+                   short_summary="Name",         long_summary="Full name."),
+        FieldMatch(table="students", column="gpa",   similarity_score=0.85,
+                   short_summary="GPA",          long_summary="GPA."),
+        FieldMatch(table="students", column="email", similarity_score=0.70,
+                   short_summary="Email",        long_summary="Email."),
+        FieldMatch(table="students", column="age",   similarity_score=0.60,
+                   short_summary="Age",          long_summary="Age."),
+    ]
+
+    # S₁ selects 4 of the 5 candidates (coverage = 4/5 = 80% → skip)
+    s1_high_coverage = LLMResponse(tool_inputs=[{
+        "selected_fields": [
+            {"table": "students", "column": "name",  "reason": "Need names"},
+            {"table": "students", "column": "gpa",   "reason": "Need GPA"},
+            {"table": "students", "column": "email", "reason": "Need email"},
+            {"table": "students", "column": "age",   "reason": "Need age"},
+        ]
+    }])
+
+    small_fields = [
+        ("students", "id",    "Student ID",   "Unique student ID. PRIMARY KEY."),
+        ("students", "name",  "Student name", "Full name."),
+        ("students", "gpa",   "GPA",          "Grade point average."),
+        ("students", "email", "Email",         "Contact email."),
+        ("students", "age",   "Age",           "Student age."),
+    ]
+    small_ddl = """\
+-- Table: students
+CREATE TABLE students (
+  id INTEGER PRIMARY KEY,  -- Unique student ID. PRIMARY KEY.
+  name TEXT,  -- Full name.
+  gpa REAL,  -- GPA.
+  email TEXT,  -- Contact email.
+  age INTEGER  -- Student age.
+);
+"""
+    small_markdown = """\
+## Table: students
+*Student data*
+
+| Column | Type | Description | Sample Values |
+|--------|------|-------------|---------------|
+| id | INTEGER (PK) | Student ID | 1, 2, 3 |
+| name | TEXT | Student name | Alice, Bob |
+| gpa | REAL | GPA | 3.9, 3.5 |
+| email | TEXT | Email | alice@uni.edu |
+| age | INTEGER | Age | 20, 22 |
+"""
+
+    grounding = GroundingContext(matched_cells=[], schema_hints=[], few_shot_examples=[])
+
+    with patch("src.schema_linking.schema_linker.get_client") as mock_get_client:
+        mock_client = AsyncMock()
+        # Only S1 response provided; S2 should NOT be called
+        mock_client.generate = AsyncMock(return_value=s1_high_coverage)
+        mock_get_client.return_value = mock_client
+
+        result = await link_schema(
+            question="What are the names of students with GPA above 3.5?",
+            evidence="",
+            grounding_context=grounding,
+            faiss_index=small_faiss,
+            full_ddl=small_ddl,
+            full_markdown=small_markdown,
+            available_fields=small_fields,
+        )
+
+    # Only 1 LLM call — the S2 call was skipped
+    assert mock_client.generate.call_count == 1, (
+        f"Expected 1 generate() call (S2 skipped due to high S1 coverage), "
+        f"got {mock_client.generate.call_count}"
+    )
+    # S1 ⊆ S2 still holds even when S2 is skipped (S2 = S1)
+    assert set(result.s1_fields).issubset(set(result.s2_fields))
+    # Result is valid
+    assert isinstance(result, LinkedSchemas)
+    assert len(result.s1_fields) > 0
+
+
+# ---------------------------------------------------------------------------
+# Test 14: S2 skipped when 0 candidates remain (all in S1)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_s2_skipped_when_zero_remaining():
+    """Only 1 generate() call when S₁ consumes all FAISS candidates.
+
+    Scenario: FAISS returns 3 candidates and S₁ LLM selects all 3.
+    After PK auto-add (which is in the same table), remaining_candidates is 0.
+    The S₂ call must be skipped; S₂ = S₁.
+    """
+    tiny_faiss = MagicMock()
+    tiny_faiss.query.return_value = [
+        FieldMatch(table="students", column="id",   similarity_score=0.95,
+                   short_summary="Student ID", long_summary="PK."),
+        FieldMatch(table="students", column="name", similarity_score=0.90,
+                   short_summary="Name",       long_summary="Full name."),
+        FieldMatch(table="students", column="gpa",  similarity_score=0.85,
+                   short_summary="GPA",        long_summary="GPA."),
+    ]
+
+    # S₁ selects all 3 → remaining_candidates = 0 → skip
+    s1_all = LLMResponse(tool_inputs=[{
+        "selected_fields": [
+            {"table": "students", "column": "id",   "reason": "PK"},
+            {"table": "students", "column": "name", "reason": "Names"},
+            {"table": "students", "column": "gpa",  "reason": "GPA"},
+        ]
+    }])
+
+    tiny_fields = [
+        ("students", "id",   "Student ID",   "Unique student ID. PRIMARY KEY."),
+        ("students", "name", "Student name", "Full name."),
+        ("students", "gpa",  "GPA",          "Grade point average."),
+    ]
+    tiny_ddl = """\
+-- Table: students
+CREATE TABLE students (
+  id INTEGER PRIMARY KEY,  -- Unique student ID. PRIMARY KEY.
+  name TEXT,  -- Full name.
+  gpa REAL  -- GPA.
+);
+"""
+    tiny_markdown = """\
+## Table: students
+*Student data*
+
+| Column | Type | Description | Sample Values |
+|--------|------|-------------|---------------|
+| id | INTEGER (PK) | Student ID | 1, 2, 3 |
+| name | TEXT | Student name | Alice, Bob |
+| gpa | REAL | GPA | 3.9, 3.5 |
+"""
+
+    grounding = GroundingContext(matched_cells=[], schema_hints=[], few_shot_examples=[])
+
+    with patch("src.schema_linking.schema_linker.get_client") as mock_get_client:
+        mock_client = AsyncMock()
+        mock_client.generate = AsyncMock(return_value=s1_all)
+        mock_get_client.return_value = mock_client
+
+        result = await link_schema(
+            question="List all student names and their GPA.",
+            evidence="",
+            grounding_context=grounding,
+            faiss_index=tiny_faiss,
+            full_ddl=tiny_ddl,
+            full_markdown=tiny_markdown,
+            available_fields=tiny_fields,
+        )
+
+    assert mock_client.generate.call_count == 1, (
+        f"Expected 1 generate() call (0 remaining candidates → S2 skipped), "
+        f"got {mock_client.generate.call_count}"
+    )
+    assert set(result.s1_fields).issubset(set(result.s2_fields))
+    assert isinstance(result, LinkedSchemas)
+
+
+# ---------------------------------------------------------------------------
+# Test 15: S2 skipped when fewer than 3 candidates remain
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_s2_skipped_when_few_remaining():
+    """Only 1 generate() call when fewer than 3 candidates remain after S₁.
+
+    Scenario: FAISS returns 8 candidates; S₁ selects 6 of them, leaving
+    only 2 in remaining_candidates (< 3 threshold) → S₂ skipped.
+    """
+    eight_faiss = MagicMock()
+    eight_faiss.query.return_value = [
+        FieldMatch(table="students", column="id",            similarity_score=0.95,
+                   short_summary="Student ID",   long_summary="PK."),
+        FieldMatch(table="students", column="name",          similarity_score=0.90,
+                   short_summary="Name",         long_summary="Full name."),
+        FieldMatch(table="students", column="gpa",           similarity_score=0.85,
+                   short_summary="GPA",          long_summary="GPA."),
+        FieldMatch(table="students", column="department_id", similarity_score=0.78,
+                   short_summary="Dept FK",      long_summary="FK to departments."),
+        FieldMatch(table="students", column="year",          similarity_score=0.70,
+                   short_summary="Year",         long_summary="Enrollment year."),
+        FieldMatch(table="students", column="email",         similarity_score=0.65,
+                   short_summary="Email",        long_summary="Email."),
+        # Only 2 remaining after S1 selects the above 6:
+        FieldMatch(table="students", column="age",           similarity_score=0.50,
+                   short_summary="Age",          long_summary="Age."),
+        FieldMatch(table="students", column="status",        similarity_score=0.40,
+                   short_summary="Status",       long_summary="Enrollment status."),
+    ]
+
+    s1_six_fields = LLMResponse(tool_inputs=[{
+        "selected_fields": [
+            {"table": "students", "column": "id",            "reason": "PK"},
+            {"table": "students", "column": "name",          "reason": "Names"},
+            {"table": "students", "column": "gpa",           "reason": "GPA"},
+            {"table": "students", "column": "department_id", "reason": "FK"},
+            {"table": "students", "column": "year",          "reason": "Year"},
+            {"table": "students", "column": "email",         "reason": "Email"},
+        ]
+    }])
+
+    grounding = GroundingContext(matched_cells=[], schema_hints=[], few_shot_examples=[])
+
+    with patch("src.schema_linking.schema_linker.get_client") as mock_get_client:
+        mock_client = AsyncMock()
+        mock_client.generate = AsyncMock(return_value=s1_six_fields)
+        mock_get_client.return_value = mock_client
+
+        result = await link_schema(
+            question="Which students enrolled in 2021 have GPA above 3.0?",
+            evidence="",
+            grounding_context=grounding,
+            faiss_index=eight_faiss,
+            full_ddl=FULL_DDL,
+            full_markdown=FULL_MARKDOWN,
+            available_fields=AVAILABLE_FIELDS,
+        )
+
+    assert mock_client.generate.call_count == 1, (
+        f"Expected 1 generate() call (only 2 remaining candidates → S2 skipped), "
+        f"got {mock_client.generate.call_count}"
+    )
+    assert set(result.s1_fields).issubset(set(result.s2_fields))
+
+
+# ---------------------------------------------------------------------------
+# Test 16: S2 still called when coverage low and many candidates remain
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_s2_called_when_low_coverage_many_remaining():
+    """2 generate() calls when S₁ covers <80% of FAISS candidates and ≥3 remain.
+
+    Scenario: FAISS returns 15 candidates; S₁ selects only 2 fields
+    (coverage ~13-27% after PK/FK), leaving 11+ remaining → S₂ call proceeds.
+    This is the standard case — the default fixture already covers this,
+    but this test makes the coverage constraint explicit.
+    """
+    with patch("src.schema_linking.schema_linker.get_client") as mock_get_client:
+        mock_client = make_mock_client()
+        mock_get_client.return_value = mock_client
+
+        result = await link_schema(
+            question="Which courses have more than 20 students enrolled?",
+            evidence="",
+            grounding_context=GroundingContext(
+                matched_cells=[], schema_hints=[], few_shot_examples=[]
+            ),
+            faiss_index=MagicMock(**{
+                "query.return_value": [
+                    FieldMatch(table="students", column="id",    similarity_score=0.95,
+                               short_summary="Student ID",   long_summary="PK."),
+                    FieldMatch(table="students", column="gpa",   similarity_score=0.90,
+                               short_summary="GPA",          long_summary="GPA."),
+                    FieldMatch(table="students", column="name",  similarity_score=0.85,
+                               short_summary="Name",         long_summary="Full name."),
+                    FieldMatch(table="students", column="department_id", similarity_score=0.70,
+                               short_summary="Dept FK",      long_summary="FK."),
+                    FieldMatch(table="courses", column="id",     similarity_score=0.80,
+                               short_summary="Course ID",    long_summary="PK."),
+                    FieldMatch(table="courses", column="title",  similarity_score=0.75,
+                               short_summary="Title",        long_summary="Title."),
+                    FieldMatch(table="courses", column="credits",similarity_score=0.65,
+                               short_summary="Credits",      long_summary="Credits."),
+                    FieldMatch(table="enrollments", column="id", similarity_score=0.78,
+                               short_summary="Enrollment ID",long_summary="PK."),
+                    FieldMatch(table="enrollments", column="student_id", similarity_score=0.72,
+                               short_summary="Student FK",   long_summary="FK."),
+                    FieldMatch(table="enrollments", column="grade",      similarity_score=0.68,
+                               short_summary="Grade",        long_summary="Grade."),
+                    FieldMatch(table="professors", column="id",  similarity_score=0.60,
+                               short_summary="Prof ID",      long_summary="PK."),
+                    FieldMatch(table="professors", column="name",similarity_score=0.58,
+                               short_summary="Prof name",    long_summary="Name."),
+                    FieldMatch(table="departments", column="id", similarity_score=0.55,
+                               short_summary="Dept ID",      long_summary="PK."),
+                    FieldMatch(table="departments", column="name", similarity_score=0.50,
+                               short_summary="Dept name",    long_summary="Name."),
+                    FieldMatch(table="enrollments", column="course_id",  similarity_score=0.62,
+                               short_summary="Course FK",    long_summary="FK."),
+                ]
+            }),
+            full_ddl=FULL_DDL,
+            full_markdown=FULL_MARKDOWN,
+            available_fields=AVAILABLE_FIELDS,
+        )
+
+    # S1 selects 2 fields, after PK/FK ~4 total → coverage 4/15 = 27% → S2 proceeds
+    assert mock_client.generate.call_count == 2, (
+        f"Expected 2 generate() calls (low coverage, many remaining → S2 runs), "
+        f"got {mock_client.generate.call_count}"
+    )
+    assert isinstance(result, LinkedSchemas)

@@ -1,0 +1,3309 @@
+{
+  "run_metadata": {
+    "timestamp": "2026-02-23 22:31:29",
+    "elapsed_seconds": 5399.1,
+    "llm_provider": "gemini",
+    "model_fast": "gemini-2.5-flash",
+    "model_powerful": "gemini-3-flash-preview",
+    "model_reasoning": "gemini-2.5-flash",
+    "cache_enabled": true,
+    "total_questions": 33,
+    "script_version": "v3"
+  },
+  "aggregate": {
+    "total": 33,
+    "correct": 18,
+    "accuracy": 0.5455,
+    "by_difficulty": {
+      "simple": {
+        "correct": 7,
+        "total": 11,
+        "accuracy": 0.6364
+      },
+      "moderate": {
+        "correct": 7,
+        "total": 11,
+        "accuracy": 0.6364
+      },
+      "challenging": {
+        "correct": 4,
+        "total": 11,
+        "accuracy": 0.3636
+      }
+    },
+    "by_database": {
+      "california_schools": {
+        "correct": 2,
+        "total": 3,
+        "accuracy": 0.6667
+      },
+      "card_games": {
+        "correct": 1,
+        "total": 3,
+        "accuracy": 0.3333
+      },
+      "codebase_community": {
+        "correct": 1,
+        "total": 3,
+        "accuracy": 0.3333
+      },
+      "debit_card_specializing": {
+        "correct": 3,
+        "total": 3,
+        "accuracy": 1.0
+      },
+      "european_football_2": {
+        "correct": 1,
+        "total": 3,
+        "accuracy": 0.3333
+      },
+      "financial": {
+        "correct": 0,
+        "total": 3,
+        "accuracy": 0.0
+      },
+      "formula_1": {
+        "correct": 3,
+        "total": 3,
+        "accuracy": 1.0
+      },
+      "student_club": {
+        "correct": 2,
+        "total": 3,
+        "accuracy": 0.6667
+      },
+      "superhero": {
+        "correct": 3,
+        "total": 3,
+        "accuracy": 1.0
+      },
+      "thrombosis_prediction": {
+        "correct": 0,
+        "total": 3,
+        "accuracy": 0.0
+      },
+      "toxicology": {
+        "correct": 2,
+        "total": 3,
+        "accuracy": 0.6667
+      }
+    },
+    "error_stage_counts": {
+      "schema_linking_timeout": 5,
+      "generation_timeout": 1
+    },
+    "oracle": {
+      "n_gold_executable": 33,
+      "oracle_pre_fix": 23,
+      "oracle_post_fix": 23,
+      "oracle_pre_fix_rate": 0.697,
+      "oracle_post_fix_rate": 0.697,
+      "selector_precision_when_oracle": 0.7826,
+      "n_oracle_achievable": 23,
+      "selector_matched": 18
+    },
+    "fixer": {
+      "total_candidates": 352,
+      "original_success": 284,
+      "post_fix_success": 333,
+      "needed_fix": 68,
+      "fixed_ok": 49,
+      "still_failing": 19,
+      "fix_success_rate": 0.7206,
+      "pre_oracle_candidates": 169,
+      "post_oracle_candidates": 181
+    },
+    "schema_linker": {
+      "n_evaluated": 33,
+      "avg_table_recall_s1": 0.5172,
+      "avg_col_recall_s1": 0.7482,
+      "avg_table_recall_s2": 0.5222,
+      "avg_col_recall_s2": 0.7603,
+      "s1_complete_count": 3,
+      "s2_complete_count": 3
+    }
+  },
+  "questions": [
+    {
+      "db_id": "california_schools",
+      "question_id": 64,
+      "difficulty": "simple",
+      "question": "What is the total number of schools with a mailing city in Hickman belonging to the charter number 00D4?",
+      "evidence": "",
+      "gold_sql": "SELECT COUNT(*) FROM schools WHERE CharterNum = '00D4' AND MailCity = 'Hickman'",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 3,
+          "cell_matches": 7,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 3,
+          "s2_fields": 13,
+          "error": null
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 3
+          },
+          "error_flags": 0,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 0,
+          "fixed_successfully": 0,
+          "still_failing": 0,
+          "original_success_count": 11,
+          "post_fix_success_count": 11,
+          "error": null
+        },
+        "selection": {
+          "method": "fast_path",
+          "winner_generator": "complex_B2_s1",
+          "cluster_count": 1,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT COUNT(*) FROM schools WHERE MailCity = 'Hickman' AND CharterNum = '00D4'",
+      "correct": true,
+      "error_stage": null,
+      "oracle_pre_fix": true,
+      "oracle_pre_fix_count": 11,
+      "oracle_post_fix": true,
+      "oracle_post_fix_count": 11,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": true,
+      "schema_recall": {
+        "required_tables": [
+          "schools"
+        ],
+        "required_cols": [],
+        "n_required_tables": 1,
+        "n_required_cols": 0,
+        "table_recall_s1": 1.0,
+        "table_recall_s2": 1.0,
+        "col_recall_s1": 1.0,
+        "col_recall_s2": 1.0,
+        "tables_in_s1": 1,
+        "tables_in_s2": 1,
+        "cols_in_s1": 0,
+        "cols_in_s2": 0,
+        "missing_tables_in_s1": [],
+        "missing_tables_in_s2": [],
+        "missing_cols_in_s1": [],
+        "missing_cols_in_s2": [],
+        "s1_complete": true,
+        "s2_complete": true
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "california_schools",
+      "question_id": 23,
+      "difficulty": "moderate",
+      "question": "List the names of schools with more than 30 difference in enrollements between K-12 and ages 5-17? Please also give the full street adress of the schools.",
+      "evidence": "Diffrence in enrollement = `Enrollment (K-12)` - `Enrollment (Ages 5-17)`",
+      "gold_sql": "SELECT T1.School, T1.Street FROM schools AS T1 INNER JOIN frpm AS T2 ON T1.CDSCode = T2.CDSCode WHERE T2.`Enrollment (K-12)` - T2.`Enrollment (Ages 5-17)` > 30",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 4,
+          "cell_matches": 1,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 0,
+          "s2_fields": 0,
+          "error": "Schema linking timed out after 120s — falling back to full DDL"
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 0
+          },
+          "error_flags": 4,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 4,
+          "fixed_successfully": 4,
+          "still_failing": 0,
+          "original_success_count": 7,
+          "post_fix_success_count": 11,
+          "error": null
+        },
+        "selection": {
+          "method": "tournament",
+          "winner_generator": "complex_B2_s1",
+          "cluster_count": 2,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT T2.School, T2.Street FROM frpm AS T1 JOIN schools AS T2 ON T1.CDSCode = T2.CDSCode WHERE (T1.\"Enrollment (K-12)\" - T1.\"Enrollment (Ages 5-17)\") > 30",
+      "correct": true,
+      "error_stage": "schema_linking_timeout",
+      "oracle_pre_fix": true,
+      "oracle_pre_fix_count": 5,
+      "oracle_post_fix": true,
+      "oracle_post_fix_count": 9,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": true,
+      "schema_recall": {
+        "required_tables": [
+          "frpm",
+          "schools",
+          "t1",
+          "t2"
+        ],
+        "required_cols": [
+          "t1.cdscode",
+          "t1.school",
+          "t1.street",
+          "t2.cdscode"
+        ],
+        "n_required_tables": 4,
+        "n_required_cols": 4,
+        "table_recall_s1": 0.5,
+        "table_recall_s2": 0.5,
+        "col_recall_s1": 0.0,
+        "col_recall_s2": 0.0,
+        "tables_in_s1": 2,
+        "tables_in_s2": 2,
+        "cols_in_s1": 0,
+        "cols_in_s2": 0,
+        "missing_tables_in_s1": [
+          "t1",
+          "t2"
+        ],
+        "missing_tables_in_s2": [
+          "t1",
+          "t2"
+        ],
+        "missing_cols_in_s1": [
+          "t1.school",
+          "t2.cdscode",
+          "t1.street",
+          "t1.cdscode"
+        ],
+        "missing_cols_in_s2": [
+          "t1.school",
+          "t2.cdscode",
+          "t1.street",
+          "t1.cdscode"
+        ],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "california_schools",
+      "question_id": 28,
+      "difficulty": "challenging",
+      "question": "Consider the average difference between K-12 enrollment and 15-17 enrollment of schools that are locally funded, list the names and DOC type of schools which has a difference above this average.",
+      "evidence": "Difference between K-12 enrollment and 15-17 enrollment can be computed by `Enrollment (K-12)` - `Enrollment (Ages 5-17)`",
+      "gold_sql": "SELECT T2.School, T2.DOC FROM frpm AS T1 INNER JOIN schools AS T2 ON T1.CDSCode = T2.CDSCode WHERE T2.FundingType = 'Locally funded' AND (T1.`Enrollment (K-12)` - T1.`Enrollment (Ages 5-17)`) > (SELECT AVG(T3.`Enrollment (K-12)` - T3.`Enrollment (Ages 5-17)`) FROM frpm AS T3 INNER JOIN schools AS T4 ON T3.CDSCode = T4.CDSCode WHERE T4.FundingType = 'Locally funded')",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 5,
+          "cell_matches": 10,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 0,
+          "s2_fields": 0,
+          "error": "Schema linking timed out after 120s — falling back to full DDL"
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 0
+          },
+          "error_flags": 4,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 5,
+          "fixed_successfully": 2,
+          "still_failing": 3,
+          "original_success_count": 6,
+          "post_fix_success_count": 8,
+          "error": null
+        },
+        "selection": {
+          "method": "tournament",
+          "winner_generator": "standard_B1_s1",
+          "cluster_count": 2,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT T2.School, T2.DOCType FROM frpm AS T1 INNER JOIN schools AS T2 ON T1.CDSCode = T2.CDSCode WHERE T2.FundingType = 'Locally funded' AND (T1.\"Enrollment (K-12)\" - T1.\"Enrollment (Ages 5-17)\") > ( SELECT AVG(T3.\"Enrollment (K-12)\" - T3.\"Enrollment (Ages 5-17)\") FROM frpm AS T3 INNER JOIN schools AS T4 ON T3.CDSCode = T4.CDSCode WHERE T4.FundingType = 'Locally funded' )",
+      "correct": false,
+      "error_stage": "schema_linking_timeout",
+      "oracle_pre_fix": false,
+      "oracle_pre_fix_count": 0,
+      "oracle_post_fix": false,
+      "oracle_post_fix_count": 0,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": false,
+      "schema_recall": {
+        "required_tables": [
+          "frpm",
+          "schools",
+          "t1",
+          "t2",
+          "t3",
+          "t4"
+        ],
+        "required_cols": [
+          "t1.cdscode",
+          "t2.cdscode",
+          "t2.doc",
+          "t2.fundingtype",
+          "t2.school",
+          "t3.cdscode",
+          "t4.cdscode",
+          "t4.fundingtype"
+        ],
+        "n_required_tables": 6,
+        "n_required_cols": 8,
+        "table_recall_s1": 0.333,
+        "table_recall_s2": 0.333,
+        "col_recall_s1": 0.0,
+        "col_recall_s2": 0.0,
+        "tables_in_s1": 2,
+        "tables_in_s2": 2,
+        "cols_in_s1": 0,
+        "cols_in_s2": 0,
+        "missing_tables_in_s1": [
+          "t4",
+          "t1",
+          "t2",
+          "t3"
+        ],
+        "missing_tables_in_s2": [
+          "t4",
+          "t1",
+          "t2",
+          "t3"
+        ],
+        "missing_cols_in_s1": [
+          "t4.fundingtype",
+          "t2.fundingtype",
+          "t4.cdscode",
+          "t3.cdscode",
+          "t2.cdscode",
+          "t1.cdscode",
+          "t2.school",
+          "t2.doc"
+        ],
+        "missing_cols_in_s2": [
+          "t4.fundingtype",
+          "t2.fundingtype",
+          "t4.cdscode",
+          "t3.cdscode",
+          "t2.cdscode",
+          "t1.cdscode",
+          "t2.school",
+          "t2.doc"
+        ],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "card_games",
+      "question_id": 463,
+      "difficulty": "simple",
+      "question": "How many translations are there for the set of cards with \"Angel of Mercy\" in it?",
+      "evidence": "set of cards with \"Angel of Mercy\" in it refers to name = 'Angel of Mercy'",
+      "gold_sql": "SELECT COUNT(DISTINCT translation) FROM set_translations WHERE setCode IN ( SELECT setCode FROM cards WHERE name = 'Angel of Mercy' ) AND translation IS NOT NULL",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 2,
+          "cell_matches": 3,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 0,
+          "s2_fields": 0,
+          "error": "Schema linking timed out after 120s — falling back to full DDL"
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 2
+          },
+          "error_flags": 1,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 2,
+          "fixed_successfully": 2,
+          "still_failing": 0,
+          "original_success_count": 9,
+          "post_fix_success_count": 11,
+          "error": null
+        },
+        "selection": {
+          "method": "tournament",
+          "winner_generator": "icl_C3",
+          "cluster_count": 6,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT COUNT(T2.id) FROM cards AS T1 JOIN set_translations AS T2 ON T1.setCode = T2.setCode WHERE T1.name = 'Angel of Mercy'",
+      "correct": false,
+      "error_stage": "schema_linking_timeout",
+      "oracle_pre_fix": true,
+      "oracle_pre_fix_count": 1,
+      "oracle_post_fix": true,
+      "oracle_post_fix_count": 1,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": false,
+      "schema_recall": {
+        "required_tables": [
+          "cards",
+          "set_translations"
+        ],
+        "required_cols": [],
+        "n_required_tables": 2,
+        "n_required_cols": 0,
+        "table_recall_s1": 1.0,
+        "table_recall_s2": 1.0,
+        "col_recall_s1": 1.0,
+        "col_recall_s2": 1.0,
+        "tables_in_s1": 2,
+        "tables_in_s2": 2,
+        "cols_in_s1": 0,
+        "cols_in_s2": 0,
+        "missing_tables_in_s1": [],
+        "missing_tables_in_s2": [],
+        "missing_cols_in_s1": [],
+        "missing_cols_in_s2": [],
+        "s1_complete": true,
+        "s2_complete": true
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "card_games",
+      "question_id": 427,
+      "difficulty": "moderate",
+      "question": "What languages are available in the set known as Archenemy on the magic card market and having the code ARC?",
+      "evidence": "known as Archenemy refers to mcmName = 'Archenemy'; having the code ARC refers to setCode = 'ARC'",
+      "gold_sql": "SELECT T2.language FROM sets AS T1 INNER JOIN set_translations AS T2 ON T1.code = T2.setCode WHERE T1.mcmName = 'Archenemy' AND T2.setCode = 'ARC'",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 3,
+          "cell_matches": 9,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 6,
+          "s2_fields": 13,
+          "error": null
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 3
+          },
+          "error_flags": 0,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 2,
+          "fixed_successfully": 0,
+          "still_failing": 2,
+          "original_success_count": 9,
+          "post_fix_success_count": 9,
+          "error": null
+        },
+        "selection": {
+          "method": "fast_path",
+          "winner_generator": "complex_B2_s1",
+          "cluster_count": 1,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT T1.language FROM set_translations AS T1 JOIN sets AS T2 ON T1.setCode = T2.code WHERE T2.mcmName = 'Archenemy' AND T2.code = 'ARC'",
+      "correct": true,
+      "error_stage": null,
+      "oracle_pre_fix": true,
+      "oracle_pre_fix_count": 9,
+      "oracle_post_fix": true,
+      "oracle_post_fix_count": 9,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": true,
+      "schema_recall": {
+        "required_tables": [
+          "set_translations",
+          "sets",
+          "t1",
+          "t2"
+        ],
+        "required_cols": [
+          "t1.code",
+          "t1.mcmname",
+          "t2.language",
+          "t2.setcode"
+        ],
+        "n_required_tables": 4,
+        "n_required_cols": 4,
+        "table_recall_s1": 0.5,
+        "table_recall_s2": 0.5,
+        "col_recall_s1": 1.0,
+        "col_recall_s2": 1.0,
+        "tables_in_s1": 2,
+        "tables_in_s2": 2,
+        "cols_in_s1": 4,
+        "cols_in_s2": 4,
+        "missing_tables_in_s1": [
+          "t1",
+          "t2"
+        ],
+        "missing_tables_in_s2": [
+          "t1",
+          "t2"
+        ],
+        "missing_cols_in_s1": [],
+        "missing_cols_in_s2": [],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "card_games",
+      "question_id": 431,
+      "difficulty": "challenging",
+      "question": "Which set is not available outside of the United States and has foil cards with Japanese writing on them? Please include the set ID in your response.",
+      "evidence": "available outside of the United States refers to isForeignOnly = 1; has foil cards refers to isFoilOnly = 1; with Japanese writing on them refers to language = 'Japanese'",
+      "gold_sql": "SELECT T1.name, T1.id FROM sets AS T1 INNER JOIN set_translations AS T2 ON T1.code = T2.setCode WHERE T2.language = 'Japanese' AND T1.isFoilOnly = 1 AND T1.isForeignOnly = 0",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 4,
+          "cell_matches": 14,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 8,
+          "s2_fields": 18,
+          "error": null
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 2
+          },
+          "error_flags": 1,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 3,
+          "fixed_successfully": 0,
+          "still_failing": 3,
+          "original_success_count": 8,
+          "post_fix_success_count": 8,
+          "error": null
+        },
+        "selection": {
+          "method": "tournament",
+          "winner_generator": "reasoning_A4",
+          "cluster_count": 5,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT DISTINCT T1.id FROM sets AS T1 INNER JOIN cards AS T2 ON T1.code = T2.setCode INNER JOIN foreign_data AS T3 ON T2.uuid = T3.uuid WHERE T1.isForeignOnly = 0 AND T1.isFoilOnly = 1 AND T3.language = 'Japanese'",
+      "correct": false,
+      "error_stage": null,
+      "oracle_pre_fix": true,
+      "oracle_pre_fix_count": 1,
+      "oracle_post_fix": true,
+      "oracle_post_fix_count": 1,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": false,
+      "schema_recall": {
+        "required_tables": [
+          "set_translations",
+          "sets",
+          "t1",
+          "t2"
+        ],
+        "required_cols": [
+          "t1.code",
+          "t1.id",
+          "t1.isfoilonly",
+          "t1.isforeignonly",
+          "t1.name",
+          "t2.language",
+          "t2.setcode"
+        ],
+        "n_required_tables": 4,
+        "n_required_cols": 7,
+        "table_recall_s1": 0.5,
+        "table_recall_s2": 0.5,
+        "col_recall_s1": 1.0,
+        "col_recall_s2": 1.0,
+        "tables_in_s1": 2,
+        "tables_in_s2": 2,
+        "cols_in_s1": 7,
+        "cols_in_s2": 7,
+        "missing_tables_in_s1": [
+          "t1",
+          "t2"
+        ],
+        "missing_tables_in_s2": [
+          "t1",
+          "t2"
+        ],
+        "missing_cols_in_s1": [],
+        "missing_cols_in_s2": [],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "codebase_community",
+      "question_id": 601,
+      "difficulty": "simple",
+      "question": "What is the score and the link type ID for post ID 395?",
+      "evidence": "",
+      "gold_sql": "SELECT T1.Score, T2.LinkTypeId FROM posts AS T1 INNER JOIN postLinks AS T2 ON T1.Id = T2.PostId WHERE T2.PostId = 395",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 3,
+          "cell_matches": 3,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 9,
+          "s2_fields": 19,
+          "error": null
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 3
+          },
+          "error_flags": 0,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 0,
+          "fixed_successfully": 0,
+          "still_failing": 0,
+          "original_success_count": 11,
+          "post_fix_success_count": 11,
+          "error": null
+        },
+        "selection": {
+          "method": "fast_path",
+          "winner_generator": "complex_B2_s1",
+          "cluster_count": 1,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT T1.Score, T2.LinkTypeId FROM posts AS T1 JOIN postLinks AS T2 ON T1.Id = T2.PostId WHERE T1.Id = 395",
+      "correct": true,
+      "error_stage": null,
+      "oracle_pre_fix": true,
+      "oracle_pre_fix_count": 11,
+      "oracle_post_fix": true,
+      "oracle_post_fix_count": 11,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": true,
+      "schema_recall": {
+        "required_tables": [
+          "postlinks",
+          "posts",
+          "t1",
+          "t2"
+        ],
+        "required_cols": [
+          "t1.id",
+          "t1.score",
+          "t2.linktypeid",
+          "t2.postid"
+        ],
+        "n_required_tables": 4,
+        "n_required_cols": 4,
+        "table_recall_s1": 0.5,
+        "table_recall_s2": 0.5,
+        "col_recall_s1": 1.0,
+        "col_recall_s2": 1.0,
+        "tables_in_s1": 2,
+        "tables_in_s2": 2,
+        "cols_in_s1": 4,
+        "cols_in_s2": 4,
+        "missing_tables_in_s1": [
+          "t1",
+          "t2"
+        ],
+        "missing_tables_in_s2": [
+          "t1",
+          "t2"
+        ],
+        "missing_cols_in_s1": [],
+        "missing_cols_in_s2": [],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "codebase_community",
+      "question_id": 571,
+      "difficulty": "moderate",
+      "question": "For the user No.24, how many times is the number of his/her posts compared to his/her votes?",
+      "evidence": "user no. 24 refers to UserId = OwnerUserId = '24'; times of his/her post than votes = Divide (Count(post.Id), Count(votes.Id))",
+      "gold_sql": "SELECT CAST(COUNT(T2.Id) AS REAL) / COUNT(DISTINCT T1.Id) FROM votes AS T1 INNER JOIN posts AS T2 ON T1.UserId = T2.OwnerUserId WHERE T1.UserId = 24",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 4,
+          "cell_matches": 1,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 8,
+          "s2_fields": 18,
+          "error": null
+        },
+        "generation": {
+          "total_candidates": 0,
+          "by_generator": {
+            "reasoning": 0,
+            "standard": 0,
+            "complex": 0,
+            "icl": 0
+          },
+          "error_flags": 0,
+          "error": "Generation timed out after 90s"
+        },
+        "fixing": {
+          "needed_fix": 0,
+          "fixed_successfully": 0,
+          "still_failing": 0,
+          "original_success_count": 0,
+          "post_fix_success_count": 0,
+          "error": "skipped — no candidates from generation"
+        },
+        "selection": {
+          "method": "N/A",
+          "winner_generator": "N/A",
+          "cluster_count": 0,
+          "error": "skipped — no fixed candidates"
+        }
+      },
+      "final_sql": "",
+      "correct": false,
+      "error_stage": "generation_timeout",
+      "oracle_pre_fix": false,
+      "oracle_pre_fix_count": 0,
+      "oracle_post_fix": false,
+      "oracle_post_fix_count": 0,
+      "oracle_total_candidates": 0,
+      "selector_matched_oracle": false,
+      "schema_recall": {
+        "required_tables": [
+          "posts",
+          "t1",
+          "t2",
+          "votes"
+        ],
+        "required_cols": [
+          "t1.id",
+          "t1.userid",
+          "t2.id",
+          "t2.owneruserid"
+        ],
+        "n_required_tables": 4,
+        "n_required_cols": 4,
+        "table_recall_s1": 0.5,
+        "table_recall_s2": 0.5,
+        "col_recall_s1": 1.0,
+        "col_recall_s2": 1.0,
+        "tables_in_s1": 2,
+        "tables_in_s2": 2,
+        "cols_in_s1": 4,
+        "cols_in_s2": 4,
+        "missing_tables_in_s1": [
+          "t1",
+          "t2"
+        ],
+        "missing_tables_in_s2": [
+          "t1",
+          "t2"
+        ],
+        "missing_cols_in_s1": [],
+        "missing_cols_in_s2": [],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "codebase_community",
+      "question_id": 586,
+      "difficulty": "challenging",
+      "question": "Which user added a bounty amount of 50 to the post title mentioning variance?",
+      "evidence": "bounty amount of 50 refers to BountyAmount = 50; user refers to DisplayName; title mentioning variance refers to Title include 'variance'",
+      "gold_sql": "SELECT T3.DisplayName, T1.Title FROM posts AS T1 INNER JOIN votes AS T2 ON T1.Id = T2.PostId INNER JOIN users AS T3 ON T3.Id = T2.UserId WHERE T2.BountyAmount = 50 AND T1.Title LIKE '%variance%'",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 3,
+          "cell_matches": 4,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 12,
+          "s2_fields": 19,
+          "error": null
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 0
+          },
+          "error_flags": 3,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 3,
+          "fixed_successfully": 3,
+          "still_failing": 0,
+          "original_success_count": 8,
+          "post_fix_success_count": 11,
+          "error": null
+        },
+        "selection": {
+          "method": "fast_path",
+          "winner_generator": "complex_B2_s1",
+          "cluster_count": 1,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT T1.DisplayName FROM users AS T1 JOIN votes AS T2 ON T1.Id = T2.UserId JOIN posts AS T3 ON T2.PostId = T3.Id WHERE T2.BountyAmount = 50 AND T3.Title LIKE '%variance%'",
+      "correct": false,
+      "error_stage": null,
+      "oracle_pre_fix": false,
+      "oracle_pre_fix_count": 0,
+      "oracle_post_fix": false,
+      "oracle_post_fix_count": 0,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": false,
+      "schema_recall": {
+        "required_tables": [
+          "posts",
+          "t1",
+          "t2",
+          "t3",
+          "users",
+          "votes"
+        ],
+        "required_cols": [
+          "t1.id",
+          "t1.title",
+          "t2.bountyamount",
+          "t2.postid",
+          "t2.userid",
+          "t3.displayname",
+          "t3.id"
+        ],
+        "n_required_tables": 6,
+        "n_required_cols": 7,
+        "table_recall_s1": 0.5,
+        "table_recall_s2": 0.5,
+        "col_recall_s1": 1.0,
+        "col_recall_s2": 1.0,
+        "tables_in_s1": 3,
+        "tables_in_s2": 3,
+        "cols_in_s1": 7,
+        "cols_in_s2": 7,
+        "missing_tables_in_s1": [
+          "t1",
+          "t2",
+          "t3"
+        ],
+        "missing_tables_in_s2": [
+          "t1",
+          "t2",
+          "t3"
+        ],
+        "missing_cols_in_s1": [],
+        "missing_cols_in_s2": [],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "debit_card_specializing",
+      "question_id": 1519,
+      "difficulty": "simple",
+      "question": "What was the product id of the transaction happened at 2012/8/23 21:20:00?",
+      "evidence": "'2012/8/23 21:20:00' can refer to date = '2012-08-23' AND T1.time = '21:20:00' in the database",
+      "gold_sql": "SELECT T1.ProductID FROM transactions_1k AS T1 INNER JOIN gasstations AS T2 ON T1.GasStationID = T2.GasStationID WHERE T1.Date = '2012-08-23' AND T1.Time = '21:20:00'",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 3,
+          "cell_matches": 2,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 4,
+          "s2_fields": 7,
+          "error": null
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 3
+          },
+          "error_flags": 0,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 0,
+          "fixed_successfully": 0,
+          "still_failing": 0,
+          "original_success_count": 11,
+          "post_fix_success_count": 11,
+          "error": null
+        },
+        "selection": {
+          "method": "fast_path",
+          "winner_generator": "reasoning_A1",
+          "cluster_count": 1,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT ProductID FROM transactions_1k WHERE Date = '2012-08-23' AND Time = '21:20:00'",
+      "correct": true,
+      "error_stage": null,
+      "oracle_pre_fix": true,
+      "oracle_pre_fix_count": 11,
+      "oracle_post_fix": true,
+      "oracle_post_fix_count": 11,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": true,
+      "schema_recall": {
+        "required_tables": [
+          "gasstations",
+          "t1",
+          "t2",
+          "transactions_1k"
+        ],
+        "required_cols": [
+          "t1.date",
+          "t1.gasstationid",
+          "t1.productid",
+          "t1.time",
+          "t2.gasstationid"
+        ],
+        "n_required_tables": 4,
+        "n_required_cols": 5,
+        "table_recall_s1": 0.25,
+        "table_recall_s2": 0.25,
+        "col_recall_s1": 0.6,
+        "col_recall_s2": 0.6,
+        "tables_in_s1": 1,
+        "tables_in_s2": 1,
+        "cols_in_s1": 3,
+        "cols_in_s2": 3,
+        "missing_tables_in_s1": [
+          "gasstations",
+          "t1",
+          "t2"
+        ],
+        "missing_tables_in_s2": [
+          "gasstations",
+          "t1",
+          "t2"
+        ],
+        "missing_cols_in_s1": [
+          "t2.gasstationid",
+          "t1.gasstationid"
+        ],
+        "missing_cols_in_s2": [
+          "t2.gasstationid",
+          "t1.gasstationid"
+        ],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "debit_card_specializing",
+      "question_id": 1474,
+      "difficulty": "moderate",
+      "question": "Which customers, paying in CZK, consumed the most gas in 2011?",
+      "evidence": "Year 2011 can be presented as Between 201101 And 201112, which means between January and December in 2011",
+      "gold_sql": "SELECT T1.CustomerID FROM customers AS T1 INNER JOIN yearmonth AS T2 ON T1.CustomerID = T2.CustomerID WHERE T1.Currency = 'CZK' AND T2.Date BETWEEN 201101 AND 201112 GROUP BY T1.CustomerID ORDER BY SUM(T2.Consumption) DESC LIMIT 1",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 3,
+          "cell_matches": 2,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 5,
+          "s2_fields": 15,
+          "error": null
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 0
+          },
+          "error_flags": 3,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 3,
+          "fixed_successfully": 3,
+          "still_failing": 0,
+          "original_success_count": 8,
+          "post_fix_success_count": 11,
+          "error": null
+        },
+        "selection": {
+          "method": "tournament",
+          "winner_generator": "complex_B2_s1",
+          "cluster_count": 2,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT T1.CustomerID FROM customers AS T1 JOIN yearmonth AS T2 ON T1.CustomerID = T2.CustomerID WHERE T1.Currency = 'CZK' AND T2.Date BETWEEN '201101' AND '201112' GROUP BY T1.CustomerID ORDER BY SUM(T2.Consumption) DESC LIMIT 1",
+      "correct": true,
+      "error_stage": null,
+      "oracle_pre_fix": true,
+      "oracle_pre_fix_count": 6,
+      "oracle_post_fix": true,
+      "oracle_post_fix_count": 9,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": true,
+      "schema_recall": {
+        "required_tables": [
+          "customers",
+          "t1",
+          "t2",
+          "yearmonth"
+        ],
+        "required_cols": [
+          "t1.currency",
+          "t1.customerid",
+          "t2.consumption",
+          "t2.customerid",
+          "t2.date"
+        ],
+        "n_required_tables": 4,
+        "n_required_cols": 5,
+        "table_recall_s1": 0.5,
+        "table_recall_s2": 0.5,
+        "col_recall_s1": 1.0,
+        "col_recall_s2": 1.0,
+        "tables_in_s1": 2,
+        "tables_in_s2": 2,
+        "cols_in_s1": 5,
+        "cols_in_s2": 5,
+        "missing_tables_in_s1": [
+          "t1",
+          "t2"
+        ],
+        "missing_tables_in_s2": [
+          "t1",
+          "t2"
+        ],
+        "missing_cols_in_s1": [],
+        "missing_cols_in_s2": [],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "debit_card_specializing",
+      "question_id": 1526,
+      "difficulty": "challenging",
+      "question": "For the customer who paid 634.8 in 2012/8/25, what was the consumption decrease rate from Year 2012 to 2013?",
+      "evidence": "'2012/8/24' can be represented by '2012-08-24'; Consumption decrease rate = (consumption_2012 - consumption_2013) / consumption_2012",
+      "gold_sql": "SELECT CAST(SUM(IIF(SUBSTR(Date, 1, 4) = '2012', Consumption, 0)) - SUM(IIF(SUBSTR(Date, 1, 4) = '2013', Consumption, 0)) AS FLOAT) / SUM(IIF(SUBSTR(Date, 1, 4) = '2012', Consumption, 0)) FROM yearmonth WHERE CustomerID = ( SELECT T1.CustomerID FROM transactions_1k AS T1 INNER JOIN gasstations AS T2 ON T1.GasStationID = T2.GasStationID WHERE T1.Date = '2012-08-25' AND T1.Price = 634.8 )",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 0,
+          "cell_matches": 2,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 7,
+          "s2_fields": 11,
+          "error": null
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 0
+          },
+          "error_flags": 4,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 7,
+          "fixed_successfully": 0,
+          "still_failing": 7,
+          "original_success_count": 4,
+          "post_fix_success_count": 4,
+          "error": null
+        },
+        "selection": {
+          "method": "fast_path",
+          "winner_generator": "standard_B1_s1",
+          "cluster_count": 1,
+          "error": null
+        }
+      },
+      "final_sql": "WITH TargetCustomer AS ( SELECT CustomerID FROM transactions_1k WHERE Price = 634.8 AND Date = '2012-08-25' ), CustomerConsumption AS ( SELECT SUM(CASE WHEN SUBSTR(T2.Date, 1, 4) = '2012' THEN T2.Consumption ELSE 0 END) AS consumption_2012, SUM(CASE WHEN SUBSTR(T2.Date, 1, 4) = '2013' THEN T2.Consumption ELSE 0 END) AS consumption_2013 FROM yearmonth AS T2 JOIN TargetCustomer AS TC ON T2.CustomerID = TC.CustomerID ) SELECT (consumption_2012 - consumption_2013) * 1.0 / consumption_2012 FROM CustomerConsumption",
+      "correct": true,
+      "error_stage": null,
+      "oracle_pre_fix": true,
+      "oracle_pre_fix_count": 4,
+      "oracle_post_fix": true,
+      "oracle_post_fix_count": 4,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": true,
+      "schema_recall": {
+        "required_tables": [
+          "gasstations",
+          "t1",
+          "t2",
+          "transactions_1k",
+          "yearmonth"
+        ],
+        "required_cols": [
+          "t1.customerid",
+          "t1.date",
+          "t1.gasstationid",
+          "t1.price",
+          "t2.gasstationid"
+        ],
+        "n_required_tables": 5,
+        "n_required_cols": 5,
+        "table_recall_s1": 0.4,
+        "table_recall_s2": 0.4,
+        "col_recall_s1": 0.6,
+        "col_recall_s2": 0.6,
+        "tables_in_s1": 2,
+        "tables_in_s2": 2,
+        "cols_in_s1": 3,
+        "cols_in_s2": 3,
+        "missing_tables_in_s1": [
+          "t2",
+          "gasstations",
+          "t1"
+        ],
+        "missing_tables_in_s2": [
+          "t2",
+          "gasstations",
+          "t1"
+        ],
+        "missing_cols_in_s1": [
+          "t2.gasstationid",
+          "t1.gasstationid"
+        ],
+        "missing_cols_in_s2": [
+          "t2.gasstationid",
+          "t1.gasstationid"
+        ],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "european_football_2",
+      "question_id": 1027,
+      "difficulty": "simple",
+      "question": "Indicate the full names of the top 10 players with the highest number of penalties.",
+      "evidence": "full name refers to player_name; players with highest number of penalties refers to MAX(penalties);",
+      "gold_sql": "SELECT t2.player_name FROM Player_Attributes AS t1 INNER JOIN Player AS t2 ON t1.id = t2.id ORDER BY t1.penalties DESC LIMIT 10",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 2,
+          "cell_matches": 0,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 8,
+          "s2_fields": 8,
+          "error": null
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 0
+          },
+          "error_flags": 3,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 4,
+          "fixed_successfully": 4,
+          "still_failing": 0,
+          "original_success_count": 7,
+          "post_fix_success_count": 11,
+          "error": null
+        },
+        "selection": {
+          "method": "tournament",
+          "winner_generator": "reasoning_A1",
+          "cluster_count": 2,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT T1.player_name FROM Player AS T1 INNER JOIN Player_Attributes AS T2 ON T1.player_api_id = T2.player_api_id ORDER BY T2.penalties DESC LIMIT 10",
+      "correct": false,
+      "error_stage": null,
+      "oracle_pre_fix": false,
+      "oracle_pre_fix_count": 0,
+      "oracle_post_fix": false,
+      "oracle_post_fix_count": 0,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": false,
+      "schema_recall": {
+        "required_tables": [
+          "player",
+          "player_attributes",
+          "t1",
+          "t2"
+        ],
+        "required_cols": [
+          "t1.id",
+          "t1.penalties",
+          "t2.id",
+          "t2.player_name"
+        ],
+        "n_required_tables": 4,
+        "n_required_cols": 4,
+        "table_recall_s1": 0.5,
+        "table_recall_s2": 0.5,
+        "col_recall_s1": 1.0,
+        "col_recall_s2": 1.0,
+        "tables_in_s1": 2,
+        "tables_in_s2": 2,
+        "cols_in_s1": 4,
+        "cols_in_s2": 4,
+        "missing_tables_in_s1": [
+          "t1",
+          "t2"
+        ],
+        "missing_tables_in_s2": [
+          "t1",
+          "t2"
+        ],
+        "missing_cols_in_s1": [],
+        "missing_cols_in_s2": [],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "european_football_2",
+      "question_id": 1025,
+      "difficulty": "moderate",
+      "question": "Give the name of the league had the most goals in the 2016 season?",
+      "evidence": "league that had the most goals refers to MAX(SUM(home_team_goal, away_team_goal)); 2016 season refers to season = '2015/2016';",
+      "gold_sql": "SELECT t2.name FROM Match AS t1 INNER JOIN League AS t2 ON t1.league_id = t2.id WHERE t1.season = '2015/2016' GROUP BY t2.name ORDER BY SUM(t1.home_team_goal + t1.away_team_goal) DESC LIMIT 1",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 3,
+          "cell_matches": 1,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 20,
+          "s2_fields": 25,
+          "error": null
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 3
+          },
+          "error_flags": 0,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 0,
+          "fixed_successfully": 0,
+          "still_failing": 0,
+          "original_success_count": 11,
+          "post_fix_success_count": 11,
+          "error": null
+        },
+        "selection": {
+          "method": "fast_path",
+          "winner_generator": "complex_B2_s1",
+          "cluster_count": 1,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT T2.name FROM Match AS T1 JOIN League AS T2 ON T1.league_id = T2.id WHERE T1.season = '2015/2016' GROUP BY T2.name ORDER BY SUM(T1.home_team_goal + T1.away_team_goal) DESC LIMIT 1",
+      "correct": true,
+      "error_stage": null,
+      "oracle_pre_fix": true,
+      "oracle_pre_fix_count": 11,
+      "oracle_post_fix": true,
+      "oracle_post_fix_count": 11,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": true,
+      "schema_recall": {
+        "required_tables": [
+          "league",
+          "match",
+          "t1",
+          "t2"
+        ],
+        "required_cols": [
+          "t1.away_team_goal",
+          "t1.home_team_goal",
+          "t1.league_id",
+          "t1.season",
+          "t2.id",
+          "t2.name"
+        ],
+        "n_required_tables": 4,
+        "n_required_cols": 6,
+        "table_recall_s1": 0.5,
+        "table_recall_s2": 0.5,
+        "col_recall_s1": 1.0,
+        "col_recall_s2": 1.0,
+        "tables_in_s1": 2,
+        "tables_in_s2": 2,
+        "cols_in_s1": 6,
+        "cols_in_s2": 6,
+        "missing_tables_in_s1": [
+          "t1",
+          "t2"
+        ],
+        "missing_tables_in_s2": [
+          "t1",
+          "t2"
+        ],
+        "missing_cols_in_s1": [],
+        "missing_cols_in_s2": [],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "european_football_2",
+      "question_id": 1031,
+      "difficulty": "challenging",
+      "question": "At present, calculate for the player's age who have a sprint speed of no less than 97 between 2013 to 2015.",
+      "evidence": "players age at present = SUBTRACT((DATETIME(), birthday)); sprint speed of no less than 97 refers to sprint_speed > = 97; between 2013 to 2015 refers to YEAR(date) > = '2013' AND YEAR(date) < = '2015'; ",
+      "gold_sql": "SELECT DISTINCT DATETIME() - T2.birthday age FROM Player_Attributes AS t1 INNER JOIN Player AS t2 ON t1.player_api_id = t2.player_api_id WHERE STRFTIME('%Y',t1.`date`) >= '2013' AND STRFTIME('%Y',t1.`date`) <= '2015' AND t1.sprint_speed >= 97",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 3,
+          "cell_matches": 3,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 9,
+          "s2_fields": 9,
+          "error": null
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 0
+          },
+          "error_flags": 4,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 4,
+          "fixed_successfully": 0,
+          "still_failing": 4,
+          "original_success_count": 7,
+          "post_fix_success_count": 7,
+          "error": null
+        },
+        "selection": {
+          "method": "tournament",
+          "winner_generator": "reasoning_A2",
+          "cluster_count": 4,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT CAST((julianday('now') - julianday(T1.birthday)) / 365.25 AS INTEGER) AS current_age FROM Player AS T1 INNER JOIN Player_Attributes AS T2 ON T1.player_api_id = T2.player_api_id WHERE T2.sprint_speed >= 97 AND strftime('%Y', T2.date) BETWEEN '2013' AND '2015' GROUP BY T1.player_api_id",
+      "correct": false,
+      "error_stage": null,
+      "oracle_pre_fix": true,
+      "oracle_pre_fix_count": 1,
+      "oracle_post_fix": true,
+      "oracle_post_fix_count": 1,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": false,
+      "schema_recall": {
+        "required_tables": [
+          "player",
+          "player_attributes",
+          "t1",
+          "t2"
+        ],
+        "required_cols": [
+          "t1.player_api_id",
+          "t1.sprint_speed",
+          "t2.birthday",
+          "t2.player_api_id"
+        ],
+        "n_required_tables": 4,
+        "n_required_cols": 4,
+        "table_recall_s1": 0.5,
+        "table_recall_s2": 0.5,
+        "col_recall_s1": 1.0,
+        "col_recall_s2": 1.0,
+        "tables_in_s1": 2,
+        "tables_in_s2": 2,
+        "cols_in_s1": 4,
+        "cols_in_s2": 4,
+        "missing_tables_in_s1": [
+          "t1",
+          "t2"
+        ],
+        "missing_tables_in_s2": [
+          "t1",
+          "t2"
+        ],
+        "missing_cols_in_s1": [],
+        "missing_cols_in_s2": [],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "financial",
+      "question_id": 109,
+      "difficulty": "simple",
+      "question": "How many clients opened their accounts in Jesenik branch were women?",
+      "evidence": "A2 has region names; Woman and female share the same meaning; female refers to gender = 'F'",
+      "gold_sql": "SELECT COUNT(T1.client_id) FROM client AS T1 INNER JOIN district AS T2 ON T1.district_id = T2.district_id WHERE T1.gender = 'F' AND T2.A2 = 'Jesenik'",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 0,
+          "cell_matches": 1,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 10,
+          "s2_fields": 15,
+          "error": null
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 1
+          },
+          "error_flags": 2,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 3,
+          "fixed_successfully": 3,
+          "still_failing": 0,
+          "original_success_count": 8,
+          "post_fix_success_count": 11,
+          "error": null
+        },
+        "selection": {
+          "method": "fast_path",
+          "winner_generator": "complex_B2_s2",
+          "cluster_count": 1,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT COUNT(DISTINCT T1.client_id) FROM client AS T1 JOIN disp AS T2 ON T1.client_id = T2.client_id JOIN account AS T3 ON T2.account_id = T3.account_id JOIN district AS T4 ON T3.district_id = T4.district_id WHERE T4.A2 = 'Jesenik' AND T1.gender = 'F'",
+      "correct": false,
+      "error_stage": null,
+      "oracle_pre_fix": false,
+      "oracle_pre_fix_count": 0,
+      "oracle_post_fix": false,
+      "oracle_post_fix_count": 0,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": false,
+      "schema_recall": {
+        "required_tables": [
+          "client",
+          "district",
+          "t1",
+          "t2"
+        ],
+        "required_cols": [
+          "t1.client_id",
+          "t1.district_id",
+          "t1.gender",
+          "t2.a2",
+          "t2.district_id"
+        ],
+        "n_required_tables": 4,
+        "n_required_cols": 5,
+        "table_recall_s1": 0.5,
+        "table_recall_s2": 0.5,
+        "col_recall_s1": 1.0,
+        "col_recall_s2": 1.0,
+        "tables_in_s1": 2,
+        "tables_in_s2": 2,
+        "cols_in_s1": 5,
+        "cols_in_s2": 5,
+        "missing_tables_in_s1": [
+          "t1",
+          "t2"
+        ],
+        "missing_tables_in_s2": [
+          "t1",
+          "t2"
+        ],
+        "missing_cols_in_s1": [],
+        "missing_cols_in_s2": [],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "financial",
+      "question_id": 135,
+      "difficulty": "moderate",
+      "question": "After making a credit card withdrawal, how many account/s with monthly issuance has a negative balance?",
+      "evidence": "Negative balance means balance < 0; Operation = 'VYBER KARTOU' stands for credit card withdraw. Frequency = 'POPLATEK MESICNE' stands for monthly issurance",
+      "gold_sql": "SELECT COUNT(T1.account_id) FROM trans AS T1 INNER JOIN account AS T2 ON T1.account_id = T2.account_id WHERE T1.balance < 0 AND T1.operation = 'VYBER KARTOU' AND T2.frequency = 'POPLATEK MESICNE'",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 3,
+          "cell_matches": 7,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 7,
+          "s2_fields": 17,
+          "error": null
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 0
+          },
+          "error_flags": 3,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 3,
+          "fixed_successfully": 3,
+          "still_failing": 0,
+          "original_success_count": 8,
+          "post_fix_success_count": 11,
+          "error": null
+        },
+        "selection": {
+          "method": "fast_path",
+          "winner_generator": "complex_B2_s1",
+          "cluster_count": 1,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT COUNT(DISTINCT T1.account_id) FROM account AS T1 JOIN trans AS T2 ON T1.account_id = T2.account_id WHERE T1.frequency = 'POPLATEK MESICNE' AND T2.operation = 'VYBER KARTOU' AND T2.balance < 0",
+      "correct": false,
+      "error_stage": null,
+      "oracle_pre_fix": false,
+      "oracle_pre_fix_count": 0,
+      "oracle_post_fix": false,
+      "oracle_post_fix_count": 0,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": false,
+      "schema_recall": {
+        "required_tables": [
+          "account",
+          "t1",
+          "t2",
+          "trans"
+        ],
+        "required_cols": [
+          "t1.account_id",
+          "t1.balance",
+          "t1.operation",
+          "t2.account_id",
+          "t2.frequency"
+        ],
+        "n_required_tables": 4,
+        "n_required_cols": 5,
+        "table_recall_s1": 0.5,
+        "table_recall_s2": 0.5,
+        "col_recall_s1": 1.0,
+        "col_recall_s2": 1.0,
+        "tables_in_s1": 2,
+        "tables_in_s2": 2,
+        "cols_in_s1": 5,
+        "cols_in_s2": 5,
+        "missing_tables_in_s1": [
+          "t1",
+          "t2"
+        ],
+        "missing_tables_in_s2": [
+          "t1",
+          "t2"
+        ],
+        "missing_cols_in_s1": [],
+        "missing_cols_in_s2": [],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "financial",
+      "question_id": 149,
+      "difficulty": "challenging",
+      "question": "Please list the account types that are not eligible for loans, and the average income of residents in the district where the account is located exceeds $8000 but is no more than $9000.",
+      "evidence": "A11 represents the average salary; Salary and income share the similar meanings; when the account type = 'OWNER', it's eligible for loans",
+      "gold_sql": "SELECT T3.type FROM district AS T1 INNER JOIN account AS T2 ON T1.district_id = T2.district_id INNER JOIN disp AS T3 ON T2.account_id = T3.account_id WHERE T3.type != 'OWNER' AND T1.A11 BETWEEN 8000 AND 9000",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 2,
+          "cell_matches": 1,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 0,
+          "s2_fields": 0,
+          "error": "Schema linking timed out after 120s — falling back to full DDL"
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 0
+          },
+          "error_flags": 3,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 3,
+          "fixed_successfully": 3,
+          "still_failing": 0,
+          "original_success_count": 8,
+          "post_fix_success_count": 11,
+          "error": null
+        },
+        "selection": {
+          "method": "fast_path",
+          "winner_generator": "complex_B2_s1",
+          "cluster_count": 1,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT DISTINCT T1.type FROM disp AS T1 JOIN account AS T2 ON T1.account_id = T2.account_id JOIN district AS T3 ON T2.district_id = T3.district_id WHERE T3.A11 > 8000 AND T3.A11 <= 9000 AND T1.type != 'OWNER'",
+      "correct": false,
+      "error_stage": "schema_linking_timeout",
+      "oracle_pre_fix": false,
+      "oracle_pre_fix_count": 0,
+      "oracle_post_fix": false,
+      "oracle_post_fix_count": 0,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": false,
+      "schema_recall": {
+        "required_tables": [
+          "account",
+          "disp",
+          "district",
+          "t1",
+          "t2",
+          "t3"
+        ],
+        "required_cols": [
+          "t1.a11",
+          "t1.district_id",
+          "t2.account_id",
+          "t2.district_id",
+          "t3.account_id",
+          "t3.type"
+        ],
+        "n_required_tables": 6,
+        "n_required_cols": 6,
+        "table_recall_s1": 0.5,
+        "table_recall_s2": 0.5,
+        "col_recall_s1": 0.0,
+        "col_recall_s2": 0.0,
+        "tables_in_s1": 3,
+        "tables_in_s2": 3,
+        "cols_in_s1": 0,
+        "cols_in_s2": 0,
+        "missing_tables_in_s1": [
+          "t1",
+          "t2",
+          "t3"
+        ],
+        "missing_tables_in_s2": [
+          "t1",
+          "t2",
+          "t3"
+        ],
+        "missing_cols_in_s1": [
+          "t3.account_id",
+          "t1.a11",
+          "t2.account_id",
+          "t3.type",
+          "t2.district_id",
+          "t1.district_id"
+        ],
+        "missing_cols_in_s2": [
+          "t3.account_id",
+          "t1.a11",
+          "t2.account_id",
+          "t3.type",
+          "t2.district_id",
+          "t1.district_id"
+        ],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "formula_1",
+      "question_id": 953,
+      "difficulty": "simple",
+      "question": "How many French constructors have a lap number of over 50?",
+      "evidence": "lap numbers of over 50 refers to laps > 50;",
+      "gold_sql": "SELECT COUNT(DISTINCT T2.constructorId) FROM results AS T1 INNER JOIN constructors AS T2 on T1.constructorId = T2.constructorId WHERE T1.laps > 50 AND T2.nationality = 'French'",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 3,
+          "cell_matches": 3,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 8,
+          "s2_fields": 18,
+          "error": null
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 3
+          },
+          "error_flags": 0,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 0,
+          "fixed_successfully": 0,
+          "still_failing": 0,
+          "original_success_count": 11,
+          "post_fix_success_count": 11,
+          "error": null
+        },
+        "selection": {
+          "method": "tournament",
+          "winner_generator": "complex_B2_s1",
+          "cluster_count": 2,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT COUNT(DISTINCT T1.constructorId) FROM constructors AS T1 JOIN results AS T2 ON T1.constructorId = T2.constructorId WHERE T1.nationality = 'French' AND T2.laps > 50",
+      "correct": true,
+      "error_stage": null,
+      "oracle_pre_fix": true,
+      "oracle_pre_fix_count": 9,
+      "oracle_post_fix": true,
+      "oracle_post_fix_count": 9,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": true,
+      "schema_recall": {
+        "required_tables": [
+          "constructors",
+          "results",
+          "t1",
+          "t2"
+        ],
+        "required_cols": [
+          "t1.constructorid",
+          "t1.laps",
+          "t2.constructorid",
+          "t2.nationality"
+        ],
+        "n_required_tables": 4,
+        "n_required_cols": 4,
+        "table_recall_s1": 0.5,
+        "table_recall_s2": 0.5,
+        "col_recall_s1": 1.0,
+        "col_recall_s2": 1.0,
+        "tables_in_s1": 2,
+        "tables_in_s2": 2,
+        "cols_in_s1": 4,
+        "cols_in_s2": 4,
+        "missing_tables_in_s1": [
+          "t1",
+          "t2"
+        ],
+        "missing_tables_in_s2": [
+          "t1",
+          "t2"
+        ],
+        "missing_cols_in_s1": [],
+        "missing_cols_in_s2": [],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "formula_1",
+      "question_id": 852,
+      "difficulty": "moderate",
+      "question": "How many races in the year 2010 are held on grand prixs outside Asia and Europe?",
+      "evidence": "",
+      "gold_sql": "SELECT COUNT(T3.raceId) FROM circuits AS T1 INNER JOIN races AS T3 ON T3.circuitID = T1.circuitId WHERE T1.country NOT IN ( 'Bahrain', 'China', 'Singapore', 'Japan', 'Korea', 'Turkey', 'UAE', 'Malaysia', 'Spain', 'Monaco', 'Azerbaijan', 'Austria', 'Belgium', 'France', 'Germany', 'Hungary', 'Italy', 'UK' ) AND T3.year = 2010",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 2,
+          "cell_matches": 3,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 6,
+          "s2_fields": 11,
+          "error": null
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 1
+          },
+          "error_flags": 4,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 4,
+          "fixed_successfully": 4,
+          "still_failing": 0,
+          "original_success_count": 7,
+          "post_fix_success_count": 11,
+          "error": null
+        },
+        "selection": {
+          "method": "tournament",
+          "winner_generator": "reasoning_A3",
+          "cluster_count": 4,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT COUNT(T1.raceId) FROM races AS T1 INNER JOIN circuits AS T2 ON T1.circuitId = T2.circuitId WHERE T1.year = 2010 AND T2.country IN ('USA', 'Canada', 'Brazil', 'Australia', 'Mexico', 'South Africa', 'Argentina')",
+      "correct": true,
+      "error_stage": null,
+      "oracle_pre_fix": true,
+      "oracle_pre_fix_count": 3,
+      "oracle_post_fix": true,
+      "oracle_post_fix_count": 3,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": true,
+      "schema_recall": {
+        "required_tables": [
+          "circuits",
+          "races",
+          "t1",
+          "t3"
+        ],
+        "required_cols": [
+          "t1.circuitid",
+          "t1.country",
+          "t3.circuitid",
+          "t3.raceid",
+          "t3.year"
+        ],
+        "n_required_tables": 4,
+        "n_required_cols": 5,
+        "table_recall_s1": 0.5,
+        "table_recall_s2": 0.5,
+        "col_recall_s1": 1.0,
+        "col_recall_s2": 1.0,
+        "tables_in_s1": 2,
+        "tables_in_s2": 2,
+        "cols_in_s1": 5,
+        "cols_in_s2": 5,
+        "missing_tables_in_s1": [
+          "t1",
+          "t3"
+        ],
+        "missing_tables_in_s2": [
+          "t1",
+          "t3"
+        ],
+        "missing_cols_in_s1": [],
+        "missing_cols_in_s2": [],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "formula_1",
+      "question_id": 994,
+      "difficulty": "challenging",
+      "question": "Which constructor scored most points from Monaco Grand Prix between 1980 and 2010? List the score, name and nationality of this team.",
+      "evidence": "Monaco Grand Priz refers to the race; race in year between 1980 and 2010",
+      "gold_sql": "SELECT SUM(T1.points), T2.name, T2.nationality FROM constructorResults AS T1 INNER JOIN constructors AS T2 ON T1.constructorId = T2.constructorId INNER JOIN races AS T3 ON T3.raceid = T1.raceid WHERE T3.name = 'Monaco Grand Prix' AND T3.year BETWEEN 1980 AND 2010 GROUP BY T2.name ORDER BY SUM(T1.points) DESC LIMIT 1",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 6,
+          "cell_matches": 9,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 0,
+          "s2_fields": 0,
+          "error": "Schema linking timed out after 120s — falling back to full DDL"
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 3
+          },
+          "error_flags": 1,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 1,
+          "fixed_successfully": 1,
+          "still_failing": 0,
+          "original_success_count": 10,
+          "post_fix_success_count": 11,
+          "error": null
+        },
+        "selection": {
+          "method": "fast_path",
+          "winner_generator": "icl_C3",
+          "cluster_count": 1,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT SUM(T1.points), T2.name, T2.nationality FROM constructorResults AS T1 JOIN constructors AS T2 ON T1.constructorId = T2.constructorId JOIN races AS T3 ON T1.raceId = T3.raceId WHERE T3.name = 'Monaco Grand Prix' AND T3.year BETWEEN 1980 AND 2010 GROUP BY T2.constructorId ORDER BY SUM(T1.points) DESC LIMIT 1",
+      "correct": true,
+      "error_stage": "schema_linking_timeout",
+      "oracle_pre_fix": true,
+      "oracle_pre_fix_count": 10,
+      "oracle_post_fix": true,
+      "oracle_post_fix_count": 11,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": true,
+      "schema_recall": {
+        "required_tables": [
+          "constructorresults",
+          "constructors",
+          "races",
+          "t1",
+          "t2",
+          "t3"
+        ],
+        "required_cols": [
+          "t1.constructorid",
+          "t1.points",
+          "t1.raceid",
+          "t2.constructorid",
+          "t2.name",
+          "t2.nationality",
+          "t3.name",
+          "t3.raceid",
+          "t3.year"
+        ],
+        "n_required_tables": 6,
+        "n_required_cols": 9,
+        "table_recall_s1": 0.5,
+        "table_recall_s2": 0.5,
+        "col_recall_s1": 0.0,
+        "col_recall_s2": 0.0,
+        "tables_in_s1": 3,
+        "tables_in_s2": 3,
+        "cols_in_s1": 0,
+        "cols_in_s2": 0,
+        "missing_tables_in_s1": [
+          "t1",
+          "t2",
+          "t3"
+        ],
+        "missing_tables_in_s2": [
+          "t1",
+          "t2",
+          "t3"
+        ],
+        "missing_cols_in_s1": [
+          "t3.name",
+          "t2.name",
+          "t1.constructorid",
+          "t1.raceid",
+          "t2.nationality",
+          "t1.points",
+          "t3.year",
+          "t3.raceid",
+          "t2.constructorid"
+        ],
+        "missing_cols_in_s2": [
+          "t3.name",
+          "t2.name",
+          "t1.constructorid",
+          "t1.raceid",
+          "t2.nationality",
+          "t1.points",
+          "t3.year",
+          "t3.raceid",
+          "t2.constructorid"
+        ],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "student_club",
+      "question_id": 1349,
+      "difficulty": "simple",
+      "question": "Provide the total number of the budget amount for \"September Speaker\" event.",
+      "evidence": "'September Speaker' is an event name; total number of budget amount refers to SUM(amount)",
+      "gold_sql": "SELECT SUM(T1.amount) FROM budget AS T1 INNER JOIN event AS T2 ON T1.link_to_event = T2.event_id WHERE T2.event_name = 'September Speaker'",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 1,
+          "cell_matches": 4,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 5,
+          "s2_fields": 15,
+          "error": null
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 3
+          },
+          "error_flags": 0,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 0,
+          "fixed_successfully": 0,
+          "still_failing": 0,
+          "original_success_count": 11,
+          "post_fix_success_count": 11,
+          "error": null
+        },
+        "selection": {
+          "method": "fast_path",
+          "winner_generator": "complex_B2_s1",
+          "cluster_count": 1,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT SUM(T1.amount) FROM budget AS T1 JOIN event AS T2 ON T1.link_to_event = T2.event_id WHERE T2.event_name = 'September Speaker'",
+      "correct": true,
+      "error_stage": null,
+      "oracle_pre_fix": true,
+      "oracle_pre_fix_count": 11,
+      "oracle_post_fix": true,
+      "oracle_post_fix_count": 11,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": true,
+      "schema_recall": {
+        "required_tables": [
+          "budget",
+          "event",
+          "t1",
+          "t2"
+        ],
+        "required_cols": [
+          "t1.amount",
+          "t1.link_to_event",
+          "t2.event_id",
+          "t2.event_name"
+        ],
+        "n_required_tables": 4,
+        "n_required_cols": 4,
+        "table_recall_s1": 0.5,
+        "table_recall_s2": 0.5,
+        "col_recall_s1": 1.0,
+        "col_recall_s2": 1.0,
+        "tables_in_s1": 2,
+        "tables_in_s2": 2,
+        "cols_in_s1": 4,
+        "cols_in_s2": 4,
+        "missing_tables_in_s1": [
+          "t1",
+          "t2"
+        ],
+        "missing_tables_in_s2": [
+          "t1",
+          "t2"
+        ],
+        "missing_cols_in_s1": [],
+        "missing_cols_in_s2": [],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "student_club",
+      "question_id": 1456,
+      "difficulty": "moderate",
+      "question": "List the full name of the top five members who spend the most money in the descending order of spending.",
+      "evidence": "full name refers to first_name, last_name; spend the most money refers to MAX(expense.cost)",
+      "gold_sql": "SELECT T3.first_name, T3.last_name FROM expense AS T1 INNER JOIN budget AS T2 ON T1.link_to_budget = T2.budget_id INNER JOIN member AS T3 ON T1.link_to_member = T3.member_id ORDER BY T2.spent DESC LIMIT 5",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 4,
+          "cell_matches": 0,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 9,
+          "s2_fields": 19,
+          "error": null
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 3
+          },
+          "error_flags": 0,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 0,
+          "fixed_successfully": 0,
+          "still_failing": 0,
+          "original_success_count": 11,
+          "post_fix_success_count": 11,
+          "error": null
+        },
+        "selection": {
+          "method": "tournament",
+          "winner_generator": "icl_C1",
+          "cluster_count": 3,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT T1.first_name, T1.last_name FROM member AS T1 JOIN expense AS T2 ON T1.member_id = T2.link_to_member GROUP BY T1.member_id ORDER BY SUM(T2.cost) DESC LIMIT 5",
+      "correct": false,
+      "error_stage": null,
+      "oracle_pre_fix": false,
+      "oracle_pre_fix_count": 0,
+      "oracle_post_fix": false,
+      "oracle_post_fix_count": 0,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": false,
+      "schema_recall": {
+        "required_tables": [
+          "budget",
+          "expense",
+          "member",
+          "t1",
+          "t2",
+          "t3"
+        ],
+        "required_cols": [
+          "t1.link_to_budget",
+          "t1.link_to_member",
+          "t2.budget_id",
+          "t2.spent",
+          "t3.first_name",
+          "t3.last_name",
+          "t3.member_id"
+        ],
+        "n_required_tables": 6,
+        "n_required_cols": 7,
+        "table_recall_s1": 0.333,
+        "table_recall_s2": 0.5,
+        "col_recall_s1": 0.714,
+        "col_recall_s2": 1.0,
+        "tables_in_s1": 2,
+        "tables_in_s2": 3,
+        "cols_in_s1": 5,
+        "cols_in_s2": 7,
+        "missing_tables_in_s1": [
+          "budget",
+          "t1",
+          "t2",
+          "t3"
+        ],
+        "missing_tables_in_s2": [
+          "t1",
+          "t2",
+          "t3"
+        ],
+        "missing_cols_in_s1": [
+          "t2.spent",
+          "t2.budget_id"
+        ],
+        "missing_cols_in_s2": [],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "student_club",
+      "question_id": 1464,
+      "difficulty": "challenging",
+      "question": "Write the full names of students who received funds on the date of 9/9/2019 and include the amount received.",
+      "evidence": "full name refers to first_name, last_name, amount of funds received refers to amount, received funds on date refers to date_received",
+      "gold_sql": "SELECT DISTINCT T3.first_name, T3.last_name, T4.amount FROM event AS T1 INNER JOIN attendance AS T2 ON T1.event_id = T2.link_to_event INNER JOIN member AS T3 ON T3.member_id = T2.link_to_member INNER JOIN income AS T4 ON T4.link_to_member = T3.member_id WHERE T4.date_received = '2019-09-09'",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 4,
+          "cell_matches": 0,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 9,
+          "s2_fields": 18,
+          "error": null
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 3
+          },
+          "error_flags": 0,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 0,
+          "fixed_successfully": 0,
+          "still_failing": 0,
+          "original_success_count": 11,
+          "post_fix_success_count": 11,
+          "error": null
+        },
+        "selection": {
+          "method": "fast_path",
+          "winner_generator": "complex_B2_s1",
+          "cluster_count": 1,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT T1.first_name, T1.last_name, T2.amount FROM member AS T1 JOIN income AS T2 ON T1.member_id = T2.link_to_member WHERE T2.date_received = '2019-09-09'",
+      "correct": true,
+      "error_stage": null,
+      "oracle_pre_fix": true,
+      "oracle_pre_fix_count": 11,
+      "oracle_post_fix": true,
+      "oracle_post_fix_count": 11,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": true,
+      "schema_recall": {
+        "required_tables": [
+          "attendance",
+          "event",
+          "income",
+          "member",
+          "t1",
+          "t2",
+          "t3",
+          "t4"
+        ],
+        "required_cols": [
+          "t1.event_id",
+          "t2.link_to_event",
+          "t2.link_to_member",
+          "t3.first_name",
+          "t3.last_name",
+          "t3.member_id",
+          "t4.amount",
+          "t4.date_received",
+          "t4.link_to_member"
+        ],
+        "n_required_tables": 8,
+        "n_required_cols": 9,
+        "table_recall_s1": 0.25,
+        "table_recall_s2": 0.25,
+        "col_recall_s1": 0.778,
+        "col_recall_s2": 0.889,
+        "tables_in_s1": 2,
+        "tables_in_s2": 2,
+        "cols_in_s1": 7,
+        "cols_in_s2": 8,
+        "missing_tables_in_s1": [
+          "attendance",
+          "t4",
+          "event",
+          "t1",
+          "t2",
+          "t3"
+        ],
+        "missing_tables_in_s2": [
+          "attendance",
+          "t4",
+          "event",
+          "t1",
+          "t2",
+          "t3"
+        ],
+        "missing_cols_in_s1": [
+          "t2.link_to_event",
+          "t1.event_id"
+        ],
+        "missing_cols_in_s2": [
+          "t1.event_id"
+        ],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "superhero",
+      "question_id": 803,
+      "difficulty": "simple",
+      "question": "What is the power ID of cryokinesis?",
+      "evidence": "power ID refers to superpower.id; cryokinesis refers to power_name = 'cryokinesis';",
+      "gold_sql": "SELECT id FROM superpower WHERE power_name = 'Cryokinesis'",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 2,
+          "cell_matches": 1,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 2,
+          "s2_fields": 4,
+          "error": null
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 3
+          },
+          "error_flags": 0,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 1,
+          "fixed_successfully": 1,
+          "still_failing": 0,
+          "original_success_count": 10,
+          "post_fix_success_count": 11,
+          "error": null
+        },
+        "selection": {
+          "method": "fast_path",
+          "winner_generator": "reasoning_A1",
+          "cluster_count": 1,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT id FROM superpower WHERE power_name = 'Cryokinesis'",
+      "correct": true,
+      "error_stage": null,
+      "oracle_pre_fix": true,
+      "oracle_pre_fix_count": 10,
+      "oracle_post_fix": true,
+      "oracle_post_fix_count": 11,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": true,
+      "schema_recall": {
+        "required_tables": [
+          "superpower"
+        ],
+        "required_cols": [],
+        "n_required_tables": 1,
+        "n_required_cols": 0,
+        "table_recall_s1": 1.0,
+        "table_recall_s2": 1.0,
+        "col_recall_s1": 1.0,
+        "col_recall_s2": 1.0,
+        "tables_in_s1": 1,
+        "tables_in_s2": 1,
+        "cols_in_s1": 0,
+        "cols_in_s2": 0,
+        "missing_tables_in_s1": [],
+        "missing_tables_in_s2": [],
+        "missing_cols_in_s1": [],
+        "missing_cols_in_s2": [],
+        "s1_complete": true,
+        "s2_complete": true
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "superhero",
+      "question_id": 782,
+      "difficulty": "moderate",
+      "question": "List the heroes' names whose eyes and hair colours are both black.",
+      "evidence": "heroes' names refers to superhero_name; eyes and hair colours are both black refers to eye_colour_id AND hair_colour_id WHERE colour.colour = 'Black';",
+      "gold_sql": "SELECT T1.superhero_name FROM superhero AS T1 INNER JOIN colour AS T2 ON T1.eye_colour_id = T2.id AND T1.hair_colour_id = T2.id WHERE T2.colour = 'Black'",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 4,
+          "cell_matches": 2,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 11,
+          "s2_fields": 17,
+          "error": null
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 3
+          },
+          "error_flags": 0,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 0,
+          "fixed_successfully": 0,
+          "still_failing": 0,
+          "original_success_count": 11,
+          "post_fix_success_count": 11,
+          "error": null
+        },
+        "selection": {
+          "method": "fast_path",
+          "winner_generator": "complex_B2_s1",
+          "cluster_count": 1,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT T1.superhero_name FROM superhero AS T1 JOIN colour AS T2 ON T1.eye_colour_id = T2.id JOIN colour AS T3 ON T1.hair_colour_id = T3.id WHERE T2.colour = 'Black' AND T3.colour = 'Black'",
+      "correct": true,
+      "error_stage": null,
+      "oracle_pre_fix": true,
+      "oracle_pre_fix_count": 11,
+      "oracle_post_fix": true,
+      "oracle_post_fix_count": 11,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": true,
+      "schema_recall": {
+        "required_tables": [
+          "colour",
+          "superhero",
+          "t1",
+          "t2"
+        ],
+        "required_cols": [
+          "t1.eye_colour_id",
+          "t1.hair_colour_id",
+          "t1.superhero_name",
+          "t2.colour",
+          "t2.id"
+        ],
+        "n_required_tables": 4,
+        "n_required_cols": 5,
+        "table_recall_s1": 0.5,
+        "table_recall_s2": 0.5,
+        "col_recall_s1": 1.0,
+        "col_recall_s2": 1.0,
+        "tables_in_s1": 2,
+        "tables_in_s2": 2,
+        "cols_in_s1": 5,
+        "cols_in_s2": 5,
+        "missing_tables_in_s1": [
+          "t2",
+          "t1"
+        ],
+        "missing_tables_in_s2": [
+          "t2",
+          "t1"
+        ],
+        "missing_cols_in_s1": [],
+        "missing_cols_in_s2": [],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "superhero",
+      "question_id": 773,
+      "difficulty": "challenging",
+      "question": "Which superhero has the same eyes, hair and skin colour? Indicate the publisher of the superhero.",
+      "evidence": "which superhero refers to superhero_name; the same eyes, hair and skin colour refers to hair_colour_id = skin_colour_id AND hair_colour_id = eye_colour_id; publisher refers to publisher_name;",
+      "gold_sql": "SELECT T1.superhero_name, T2.publisher_name FROM superhero AS T1 INNER JOIN publisher AS T2 ON T1.publisher_id = T2.id WHERE T1.eye_colour_id = T1.hair_colour_id AND T1.eye_colour_id = T1.skin_colour_id",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 5,
+          "cell_matches": 0,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 0,
+          "s2_fields": 0,
+          "error": "Schema linking timed out after 120s — falling back to full DDL"
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 3
+          },
+          "error_flags": 0,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 1,
+          "fixed_successfully": 1,
+          "still_failing": 0,
+          "original_success_count": 10,
+          "post_fix_success_count": 11,
+          "error": null
+        },
+        "selection": {
+          "method": "tournament",
+          "winner_generator": "reasoning_A3",
+          "cluster_count": 2,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT S.superhero_name, P.publisher_name FROM superhero AS S JOIN publisher AS P ON S.publisher_id = P.id WHERE S.eye_colour_id = S.hair_colour_id AND S.hair_colour_id = S.skin_colour_id",
+      "correct": true,
+      "error_stage": "schema_linking_timeout",
+      "oracle_pre_fix": true,
+      "oracle_pre_fix_count": 9,
+      "oracle_post_fix": true,
+      "oracle_post_fix_count": 10,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": true,
+      "schema_recall": {
+        "required_tables": [
+          "publisher",
+          "superhero",
+          "t1",
+          "t2"
+        ],
+        "required_cols": [
+          "t1.eye_colour_id",
+          "t1.hair_colour_id",
+          "t1.publisher_id",
+          "t1.skin_colour_id",
+          "t1.superhero_name",
+          "t2.id",
+          "t2.publisher_name"
+        ],
+        "n_required_tables": 4,
+        "n_required_cols": 7,
+        "table_recall_s1": 0.5,
+        "table_recall_s2": 0.5,
+        "col_recall_s1": 0.0,
+        "col_recall_s2": 0.0,
+        "tables_in_s1": 2,
+        "tables_in_s2": 2,
+        "cols_in_s1": 0,
+        "cols_in_s2": 0,
+        "missing_tables_in_s1": [
+          "t1",
+          "t2"
+        ],
+        "missing_tables_in_s2": [
+          "t1",
+          "t2"
+        ],
+        "missing_cols_in_s1": [
+          "t2.publisher_name",
+          "t1.hair_colour_id",
+          "t1.eye_colour_id",
+          "t1.publisher_id",
+          "t1.superhero_name",
+          "t2.id",
+          "t1.skin_colour_id"
+        ],
+        "missing_cols_in_s2": [
+          "t2.publisher_name",
+          "t1.hair_colour_id",
+          "t1.eye_colour_id",
+          "t1.publisher_id",
+          "t1.superhero_name",
+          "t2.id",
+          "t1.skin_colour_id"
+        ],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "thrombosis_prediction",
+      "question_id": 1276,
+      "difficulty": "simple",
+      "question": "For the patients who have an abnormal level of anti-DNA, please list the diseases they are diagnosed with.",
+      "evidence": "abnormal level of anti-DNA refers to DNA > = 8; diseases refers to Diagnosis;",
+      "gold_sql": "SELECT DISTINCT(T1.Diagnosis) FROM Patient AS T1 INNER JOIN Laboratory AS T2 ON T1.ID = T2.ID WHERE T2.DNA >= 8",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 2,
+          "cell_matches": 3,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 19,
+          "s2_fields": 19,
+          "error": null
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 0
+          },
+          "error_flags": 3,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 3,
+          "fixed_successfully": 3,
+          "still_failing": 0,
+          "original_success_count": 8,
+          "post_fix_success_count": 11,
+          "error": null
+        },
+        "selection": {
+          "method": "tournament",
+          "winner_generator": "complex_B2_s1",
+          "cluster_count": 3,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT DISTINCT T1.Diagnosis FROM Patient AS T1 JOIN Laboratory AS T2 ON T1.ID = T2.ID WHERE CAST(T2.DNA AS REAL) >= 8",
+      "correct": false,
+      "error_stage": null,
+      "oracle_pre_fix": true,
+      "oracle_pre_fix_count": 1,
+      "oracle_post_fix": true,
+      "oracle_post_fix_count": 3,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": false,
+      "schema_recall": {
+        "required_tables": [
+          "laboratory",
+          "patient",
+          "t1",
+          "t2"
+        ],
+        "required_cols": [
+          "t1.diagnosis",
+          "t1.id",
+          "t2.dna",
+          "t2.id"
+        ],
+        "n_required_tables": 4,
+        "n_required_cols": 4,
+        "table_recall_s1": 0.5,
+        "table_recall_s2": 0.5,
+        "col_recall_s1": 1.0,
+        "col_recall_s2": 1.0,
+        "tables_in_s1": 2,
+        "tables_in_s2": 2,
+        "cols_in_s1": 4,
+        "cols_in_s2": 4,
+        "missing_tables_in_s1": [
+          "t1",
+          "t2"
+        ],
+        "missing_tables_in_s2": [
+          "t1",
+          "t2"
+        ],
+        "missing_cols_in_s1": [],
+        "missing_cols_in_s2": [],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "thrombosis_prediction",
+      "question_id": 1225,
+      "difficulty": "moderate",
+      "question": "List and group all patients by sex for total bilirubin (T-BIL) level not within the normal range.",
+      "evidence": "List refers to GROUP_CONCAT(DISTINCT ID); total bilirubin (T-BIL) not within normal range refers to T-BIL > = 2.0",
+      "gold_sql": "SELECT T1.ID,T1.SEX FROM Patient AS T1 INNER JOIN Laboratory AS T2 ON T1.ID = T2.ID WHERE T2.`T-BIL` >= 2.0 GROUP BY T1.SEX,T1.ID",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 3,
+          "cell_matches": 1,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 0,
+          "s2_fields": 0,
+          "error": "Schema linking timed out after 120s — falling back to full DDL"
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 0
+          },
+          "error_flags": 3,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 3,
+          "fixed_successfully": 3,
+          "still_failing": 0,
+          "original_success_count": 8,
+          "post_fix_success_count": 11,
+          "error": null
+        },
+        "selection": {
+          "method": "tournament",
+          "winner_generator": "reasoning_A1",
+          "cluster_count": 2,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT P.SEX, GROUP_CONCAT(DISTINCT P.ID) FROM Patient AS P JOIN Laboratory AS L ON P.ID = L.ID WHERE L.\"T-BIL\" >= 2.0 GROUP BY P.SEX",
+      "correct": false,
+      "error_stage": "schema_linking_timeout",
+      "oracle_pre_fix": false,
+      "oracle_pre_fix_count": 0,
+      "oracle_post_fix": false,
+      "oracle_post_fix_count": 0,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": false,
+      "schema_recall": {
+        "required_tables": [
+          "laboratory",
+          "patient",
+          "t1",
+          "t2"
+        ],
+        "required_cols": [
+          "t1.id",
+          "t1.sex",
+          "t2.id"
+        ],
+        "n_required_tables": 4,
+        "n_required_cols": 3,
+        "table_recall_s1": 0.5,
+        "table_recall_s2": 0.5,
+        "col_recall_s1": 0.0,
+        "col_recall_s2": 0.0,
+        "tables_in_s1": 2,
+        "tables_in_s2": 2,
+        "cols_in_s1": 0,
+        "cols_in_s2": 0,
+        "missing_tables_in_s1": [
+          "t1",
+          "t2"
+        ],
+        "missing_tables_in_s2": [
+          "t1",
+          "t2"
+        ],
+        "missing_cols_in_s1": [
+          "t2.id",
+          "t1.sex",
+          "t1.id"
+        ],
+        "missing_cols_in_s2": [
+          "t2.id",
+          "t1.sex",
+          "t1.id"
+        ],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "thrombosis_prediction",
+      "question_id": 1295,
+      "difficulty": "challenging",
+      "question": "Among the patients whose total bilirubin is over the normal range, how many of them have a peripheral pattern observed in the sheet of ANA examination?",
+      "evidence": "total bilirubin is over the normal range refers to `T-BIL` > = 2.0; peripheral pattern is observed in the sheet of ANA examination refers to that ANA Pattern contains 'P';",
+      "gold_sql": "SELECT COUNT(T1.ID) FROM Patient AS T1 INNER JOIN Laboratory AS T2 ON T1.ID = T2.ID INNER JOIN Examination AS T3 ON T1.ID = T3.ID WHERE T2.`T-BIL` >= 2 AND T3.`ANA Pattern` LIKE '%P%'",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 2,
+          "cell_matches": 2,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 0,
+          "s2_fields": 0,
+          "error": "Schema linking timed out after 120s — falling back to full DDL"
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 0
+          },
+          "error_flags": 4,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 4,
+          "fixed_successfully": 4,
+          "still_failing": 0,
+          "original_success_count": 7,
+          "post_fix_success_count": 11,
+          "error": null
+        },
+        "selection": {
+          "method": "fast_path",
+          "winner_generator": "complex_B2_s1",
+          "cluster_count": 1,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT COUNT(DISTINCT T1.ID) FROM Laboratory AS T1 JOIN Examination AS T2 ON T1.ID = T2.ID WHERE T1.\"T-BIL\" >= 2.0 AND T2.\"ANA Pattern\" LIKE '%P%'",
+      "correct": false,
+      "error_stage": "schema_linking_timeout",
+      "oracle_pre_fix": false,
+      "oracle_pre_fix_count": 0,
+      "oracle_post_fix": false,
+      "oracle_post_fix_count": 0,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": false,
+      "schema_recall": {
+        "required_tables": [
+          "examination",
+          "laboratory",
+          "patient",
+          "t1",
+          "t2",
+          "t3"
+        ],
+        "required_cols": [
+          "t1.id",
+          "t2.id",
+          "t3.id"
+        ],
+        "n_required_tables": 6,
+        "n_required_cols": 3,
+        "table_recall_s1": 0.5,
+        "table_recall_s2": 0.5,
+        "col_recall_s1": 0.0,
+        "col_recall_s2": 0.0,
+        "tables_in_s1": 3,
+        "tables_in_s2": 3,
+        "cols_in_s1": 0,
+        "cols_in_s2": 0,
+        "missing_tables_in_s1": [
+          "t1",
+          "t2",
+          "t3"
+        ],
+        "missing_tables_in_s2": [
+          "t1",
+          "t2",
+          "t3"
+        ],
+        "missing_cols_in_s1": [
+          "t3.id",
+          "t2.id",
+          "t1.id"
+        ],
+        "missing_cols_in_s2": [
+          "t3.id",
+          "t2.id",
+          "t1.id"
+        ],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "toxicology",
+      "question_id": 195,
+      "difficulty": "simple",
+      "question": "What is the most common bond type?",
+      "evidence": "most common bond type refers MAX(COUNT(bond_type))",
+      "gold_sql": "SELECT T.bond_type FROM ( SELECT bond_type, COUNT(bond_id) FROM bond GROUP BY bond_type ORDER BY COUNT(bond_id) DESC LIMIT 1 ) AS T",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 1,
+          "cell_matches": 0,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 3,
+          "s2_fields": 9,
+          "error": null
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 3
+          },
+          "error_flags": 0,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 0,
+          "fixed_successfully": 0,
+          "still_failing": 0,
+          "original_success_count": 11,
+          "post_fix_success_count": 11,
+          "error": null
+        },
+        "selection": {
+          "method": "fast_path",
+          "winner_generator": "complex_B2_s2",
+          "cluster_count": 1,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT bond_type FROM bond GROUP BY bond_type ORDER BY COUNT(*) DESC LIMIT 1",
+      "correct": true,
+      "error_stage": null,
+      "oracle_pre_fix": true,
+      "oracle_pre_fix_count": 11,
+      "oracle_post_fix": true,
+      "oracle_post_fix_count": 11,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": true,
+      "schema_recall": {
+        "required_tables": [
+          "bond",
+          "t"
+        ],
+        "required_cols": [
+          "t.bond_type"
+        ],
+        "n_required_tables": 2,
+        "n_required_cols": 1,
+        "table_recall_s1": 0.5,
+        "table_recall_s2": 0.5,
+        "col_recall_s1": 1.0,
+        "col_recall_s2": 1.0,
+        "tables_in_s1": 1,
+        "tables_in_s2": 1,
+        "cols_in_s1": 1,
+        "cols_in_s2": 1,
+        "missing_tables_in_s1": [
+          "t"
+        ],
+        "missing_tables_in_s2": [
+          "t"
+        ],
+        "missing_cols_in_s1": [],
+        "missing_cols_in_s2": [],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "toxicology",
+      "question_id": 237,
+      "difficulty": "moderate",
+      "question": "Which molecule does the atom TR001_10 belong to? Please state whether this molecule is carcinogenic or not.",
+      "evidence": "TR001_10 is the atom id; label = '+' mean molecules are carcinogenic",
+      "gold_sql": "SELECT T2.molecule_id , IIF(T2.label = '+', 'YES', 'NO') AS flag_carcinogenic FROM atom AS T1 INNER JOIN molecule AS T2 ON T1.molecule_id = T2.molecule_id WHERE T1.atom_id = 'TR001_10'",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 4,
+          "cell_matches": 4,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 4,
+          "s2_fields": 9,
+          "error": null
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 3
+          },
+          "error_flags": 0,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 0,
+          "fixed_successfully": 0,
+          "still_failing": 0,
+          "original_success_count": 11,
+          "post_fix_success_count": 11,
+          "error": null
+        },
+        "selection": {
+          "method": "fast_path",
+          "winner_generator": "icl_C1",
+          "cluster_count": 1,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT T1.molecule_id, IIF(T2.label = '+', 'YES', 'NO') FROM atom AS T1 INNER JOIN molecule AS T2 ON T1.molecule_id = T2.molecule_id WHERE T1.atom_id = 'TR001_10'",
+      "correct": true,
+      "error_stage": null,
+      "oracle_pre_fix": true,
+      "oracle_pre_fix_count": 11,
+      "oracle_post_fix": true,
+      "oracle_post_fix_count": 11,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": true,
+      "schema_recall": {
+        "required_tables": [
+          "atom",
+          "molecule",
+          "t1",
+          "t2"
+        ],
+        "required_cols": [
+          "t1.atom_id",
+          "t1.molecule_id",
+          "t2.label",
+          "t2.molecule_id"
+        ],
+        "n_required_tables": 4,
+        "n_required_cols": 4,
+        "table_recall_s1": 0.5,
+        "table_recall_s2": 0.5,
+        "col_recall_s1": 1.0,
+        "col_recall_s2": 1.0,
+        "tables_in_s1": 2,
+        "tables_in_s2": 2,
+        "cols_in_s1": 4,
+        "cols_in_s2": 4,
+        "missing_tables_in_s1": [
+          "t1",
+          "t2"
+        ],
+        "missing_tables_in_s2": [
+          "t1",
+          "t2"
+        ],
+        "missing_cols_in_s1": [],
+        "missing_cols_in_s2": [],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    },
+    {
+      "db_id": "toxicology",
+      "question_id": 304,
+      "difficulty": "challenging",
+      "question": "List all carcinogenic molecules and their elements.",
+      "evidence": "label = '+' mean molecules are carcinogenic; element = 'cl' means Chlorine; element = 'c' means Carbon; element = 'h' means Hydrogen; element = 'o' means Oxygen, element = 's' means Sulfur; element = 'n' means Nitrogen, element = 'p' means Phosphorus, element = 'na' means Sodium, element = 'br' means Bromine, element = 'f' means Fluorine; element = 'i' means Iodine; element = 'sn' means Tin; element = 'pb' means Lead; element = 'te' means Tellurium; element = 'ca' means Calcium",
+      "gold_sql": "SELECT DISTINCT T2.molecule_id, T1.element FROM atom AS T1 INNER JOIN molecule AS T2 ON T1.molecule_id = T2.molecule_id WHERE T2.label = '+'",
+      "stages": {
+        "grounding": {
+          "keywords_extracted": 2,
+          "cell_matches": 2,
+          "few_shot_examples": 8,
+          "error": null
+        },
+        "schema_linking": {
+          "s1_fields": 5,
+          "s2_fields": 10,
+          "error": null
+        },
+        "generation": {
+          "total_candidates": 11,
+          "by_generator": {
+            "reasoning": 4,
+            "standard": 2,
+            "complex": 2,
+            "icl": 0
+          },
+          "error_flags": 5,
+          "error": null
+        },
+        "fixing": {
+          "needed_fix": 5,
+          "fixed_successfully": 5,
+          "still_failing": 0,
+          "original_success_count": 6,
+          "post_fix_success_count": 11,
+          "error": null
+        },
+        "selection": {
+          "method": "tournament",
+          "winner_generator": "reasoning_A1",
+          "cluster_count": 2,
+          "error": null
+        }
+      },
+      "final_sql": "SELECT T1.molecule_id, T2.element FROM molecule AS T1 INNER JOIN atom AS T2 ON T1.molecule_id = T2.molecule_id WHERE T1.label = '+' ORDER BY T1.molecule_id, T2.element",
+      "correct": false,
+      "error_stage": null,
+      "oracle_pre_fix": true,
+      "oracle_pre_fix_count": 1,
+      "oracle_post_fix": true,
+      "oracle_post_fix_count": 1,
+      "oracle_total_candidates": 11,
+      "selector_matched_oracle": false,
+      "schema_recall": {
+        "required_tables": [
+          "atom",
+          "molecule",
+          "t1",
+          "t2"
+        ],
+        "required_cols": [
+          "t1.element",
+          "t1.molecule_id",
+          "t2.label",
+          "t2.molecule_id"
+        ],
+        "n_required_tables": 4,
+        "n_required_cols": 4,
+        "table_recall_s1": 0.5,
+        "table_recall_s2": 0.5,
+        "col_recall_s1": 1.0,
+        "col_recall_s2": 1.0,
+        "tables_in_s1": 2,
+        "tables_in_s2": 2,
+        "cols_in_s1": 4,
+        "cols_in_s2": 4,
+        "missing_tables_in_s1": [
+          "t1",
+          "t2"
+        ],
+        "missing_tables_in_s2": [
+          "t1",
+          "t2"
+        ],
+        "missing_cols_in_s1": [],
+        "missing_cols_in_s2": [],
+        "s1_complete": false,
+        "s2_complete": false
+      },
+      "gold_exec_success": true
+    }
+  ]
+}

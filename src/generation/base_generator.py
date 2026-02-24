@@ -130,5 +130,33 @@ def build_base_prompt(question: str, evidence: str, cell_matches: list) -> str:
         lines.append("")
 
     lines.append("Write a SQL query that answers the question.")
+    lines.append("")
+    lines.append("## SQL Writing Rules")
+    lines.append(
+        "1. SELECT completeness: Return ALL columns the question explicitly asks for. "
+        "If the question asks \"what is the X and Y\", your SELECT must include both X and Y."
+    )
+    lines.append(
+        "2. Value mappings: If the evidence defines a mapping (e.g., label = '+' means 'YES', "
+        "'M' means 'Male'), apply that transformation using CASE or IIF in your SELECT — "
+        "do not return the raw stored value."
+    )
+    lines.append(
+        "3. Ratio direction: For questions asking \"how many times is A compared to B\", compute "
+        "A/B (not B/A). Use DISTINCT only when the question implies uniqueness (\"unique\", "
+        "\"distinct\", \"different\")."
+    )
+    lines.append(
+        "4. Evidence scope: The evidence provides schema context (column meanings, value "
+        "definitions). Use it to understand column semantics and filtering conditions. "
+        "Trust the question wording to determine the output format, number of rows, "
+        "and whether to aggregate."
+    )
+    lines.append(
+        "5. Binary output format: When the question asks whether something is true/false, "
+        "yes/no, or carcinogenic/not carcinogenic, return 'YES' or 'NO' (not full words like "
+        "'carcinogenic' or 'not carcinogenic'). Use IIF(condition, 'YES', 'NO') or "
+        "CASE WHEN condition THEN 'YES' ELSE 'NO' END."
+    )
 
     return "\n".join(lines)

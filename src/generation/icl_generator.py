@@ -129,6 +129,7 @@ class ICLGenerator:
         system_blocks: list[CacheableText],
         base_prompt: str,
         instruction: str,
+        temperature: float = 0.7,
     ) -> SQLCandidate:
         """Generate a single ICL candidate."""
         # Combine base prompt with per-variant instruction
@@ -137,13 +138,14 @@ class ICLGenerator:
         client = get_client()
         try:
             response = await client.generate(
-                model=settings.model_powerful,
+                model=settings.model_powerful_list,
                 system=system_blocks,
                 messages=[{"role": "user", "content": user_prompt}],
                 tools=[],
                 tool_choice_name=None,
                 thinking=None,
                 max_tokens=4096,  # increased from 2000: gemini-2.5-pro needs headroom for implicit reasoning
+                temperature=temperature,
             )
         except Exception as exc:
             logger.error("ICLGenerator %s failed: %s", candidate_id, exc)
@@ -157,6 +159,26 @@ class ICLGenerator:
             )
 
         raw_text = response.text
+
+        # Detect and discard truncated responses: finish_reason=MAX_TOKENS with
+        # partial text means the SQL was cut off mid-statement.  A truncated SQL
+        # always fails SQLite with "incomplete input"; better to mark error_flag
+        # than to pass broken SQL to the query fixer.
+        if "MAX_TOKENS" in str(response.finish_reason):
+            logger.warning(
+                "ICLGenerator %s: response truncated at MAX_TOKENS "
+                "(partial text discarded)",
+                candidate_id,
+            )
+            return SQLCandidate(
+                sql="",
+                generator_id=candidate_id,
+                schema_used="s2",
+                schema_format="markdown",
+                reasoning_trace=None,
+                error_flag=True,
+            )
+
         if raw_text is None:
             logger.warning(
                 "ICLGenerator %s: response.text is None", candidate_id
