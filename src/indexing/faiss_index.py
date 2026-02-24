@@ -44,6 +44,14 @@ def _get_embedding_model():
     """Lazily load the SentenceTransformer model."""
     global _EMBEDDING_MODEL
     if _EMBEDDING_MODEL is None:
+        # Suppress HuggingFace/tqdm progress output before loading the model.
+        # These env vars must be set before the first SentenceTransformer import
+        # to avoid BrokenPipeError when stdout/stderr is a broken pipe (e.g. when
+        # the calling process was launched with `| head -N` in a shell).
+        import os
+        os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+        os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+        os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
         from sentence_transformers import SentenceTransformer
         _EMBEDDING_MODEL = SentenceTransformer(_EMBEDDING_MODEL_NAME)
         logger.info("Loaded SentenceTransformer model: %s", _EMBEDDING_MODEL_NAME)

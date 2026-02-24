@@ -23,10 +23,12 @@ from src.llm.base import (
     CacheableText,
     LLMClient,
     LLMError,
+    LLMMalformedToolError,
     LLMRateLimitError,
     LLMResponse,
     ThinkingConfig,
     ToolParam,
+    sanitize_prompt_text,
 )
 from src.config.settings import settings
 
@@ -54,8 +56,10 @@ __all__ = [
     "LLMClient",
     "LLMResponse",
     "LLMError",
+    "LLMMalformedToolError",
     "LLMRateLimitError",
     "ToolParam",
     "CacheableText",
     "ThinkingConfig",
+    "sanitize_prompt_text",
 ]

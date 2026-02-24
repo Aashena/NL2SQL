@@ -25,7 +25,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from src.llm.base import CacheableText, LLMClient, LLMError, LLMRateLimitError, LLMResponse, ThinkingConfig, ToolParam
+from src.llm.base import CacheableText, LLMClient, LLMError, LLMMalformedToolError, LLMRateLimitError, LLMResponse, ThinkingConfig, ToolParam
 
 logger = logging.getLogger(__name__)
 
@@ -269,6 +269,13 @@ def _parse_response(raw: Any) -> LLMResponse:
         )
 
     finish_reason = str(getattr(candidate, "finish_reason", "UNKNOWN"))
+
+    # Detect MALFORMED_FUNCTION_CALL immediately — retrying with the same
+    # prompt will not help; callers should apply prompt simplification instead.
+    if "MALFORMED_FUNCTION_CALL" in finish_reason:
+        raise LLMMalformedToolError(
+            f"Gemini returned MALFORMED_FUNCTION_CALL (finish_reason={finish_reason})"
+        )
 
     for part in (candidate.content.parts or []):
         if hasattr(part, "function_call") and part.function_call:

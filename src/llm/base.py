@@ -7,6 +7,7 @@ codebase stays provider-agnostic.
 """
 
 import logging
+import re as _re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -174,3 +175,32 @@ class LLMRateLimitError(LLMError):
     LLMError is unaffected.
     """
     pass
+
+
+class LLMMalformedToolError(LLMError):
+    """
+    Raised when a tool-use response is malformed: the model returned a tool
+    call but its arguments are missing, truncated, or unparseable
+    (e.g. Gemini MALFORMED_FUNCTION_CALL finish_reason).
+    Subclass of LLMError so existing `except LLMError` clauses are unaffected.
+    """
+    pass
+
+
+def sanitize_prompt_text(text: str) -> str:
+    """
+    Sanitize user-provided strings before embedding in tool-use prompts.
+
+    Gemini's function-call parser is sensitive to backtick-quoted identifiers,
+    null bytes, and certain control characters in the prompt.  This function
+    normalises them without altering semantic content:
+      1. Backtick-quoted tokens → single-quoted:  `col` → 'col'
+      2. Null bytes → space
+      3. Non-printable control chars (except \\n \\t) → space
+    """
+    if not text:
+        return text
+    text = _re.sub(r'`([^`]*)`', r"'\1'", text)
+    text = text.replace('\x00', ' ')
+    text = _re.sub(r'[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]', ' ', text)
+    return text

@@ -15,7 +15,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
-from src.llm import get_client, CacheableText, ToolParam, LLMError
+from src.llm import get_client, CacheableText, ToolParam, LLMError, sanitize_prompt_text
 from src.config.settings import settings
 
 if TYPE_CHECKING:
@@ -168,7 +168,11 @@ async def ground_context(
     # Step 5.1 — Keyword / literal extraction via LLM tool call
     # ------------------------------------------------------------------
     client = get_client()
-    user_message = f"Question: {question}\nEvidence: {evidence_str}"
+    # Sanitize to avoid Gemini MALFORMED_FUNCTION_CALL on special characters
+    # (e.g. backtick-quoted identifiers, control chars in evidence strings)
+    safe_question = sanitize_prompt_text(question)
+    safe_evidence = sanitize_prompt_text(evidence_str)
+    user_message = f"Question: {safe_question}\nEvidence: {safe_evidence}"
 
     try:
         response = await client.generate(
@@ -182,8 +186,22 @@ async def ground_context(
         )
         if response.tool_inputs:
             tool_output = response.tool_inputs[0]
-            literals: list[str] = tool_output.get("literals", [])
-            schema_references: list[str] = tool_output.get("schema_references", [])
+            raw_literals = tool_output.get("literals", [])
+            raw_refs = tool_output.get("schema_references", [])
+            if not isinstance(raw_literals, list):
+                logger.warning(
+                    "Grounding: 'literals' is not a list (%r); using []",
+                    type(raw_literals).__name__,
+                )
+                raw_literals = []
+            if not isinstance(raw_refs, list):
+                logger.warning(
+                    "Grounding: 'schema_references' is not a list (%r); using []",
+                    type(raw_refs).__name__,
+                )
+                raw_refs = []
+            literals: list[str] = [str(x) for x in raw_literals if x is not None]
+            schema_references: list[str] = [str(x) for x in raw_refs if x is not None]
         else:
             literals = []
             schema_references = []
@@ -248,7 +266,18 @@ async def ground_context(
     # ------------------------------------------------------------------
     # ExampleStore internally masks the question before embedding; we just
     # pass the raw question.
-    few_shot_examples = example_store.query(question, db_id=db_id, top_k=8)
+    # Catch OSError (includes BrokenPipeError) in case the SentenceTransformer
+    # model load writes to a broken stdout/stderr pipe. Log as CRITICAL so it
+    # surfaces clearly; downstream stages continue with empty few-shot context.
+    try:
+        few_shot_examples = example_store.query(question, db_id=db_id, top_k=8)
+    except OSError as exc:
+        logger.critical(
+            "ExampleStore.query() OS error (broken pipe?): %s — "
+            "returning empty few-shot examples",
+            exc,
+        )
+        few_shot_examples = []
 
     return GroundingContext(
         matched_cells=matched_cells,

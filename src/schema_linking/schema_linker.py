@@ -20,7 +20,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
-from src.llm import get_client, CacheableText, LLMError, ToolParam
+from src.llm import get_client, CacheableText, LLMError, ToolParam, sanitize_prompt_text
 from src.config.settings import settings
 
 if TYPE_CHECKING:
@@ -459,6 +459,19 @@ async def link_schema(
     """
     evidence_str = evidence if evidence else "None"
 
+    # Sanitize question and evidence before embedding in tool-use prompts.
+    # Gemini's function-call parser fails on backtick-quoted identifiers,
+    # control characters, and very long evidence blocks (100+ tokens).
+    safe_question = sanitize_prompt_text(question)
+    safe_evidence = sanitize_prompt_text(evidence_str)
+    _MAX_EVIDENCE_CHARS = 500  # ~125 tokens; enough for all normal evidence strings
+    if len(safe_evidence) > _MAX_EVIDENCE_CHARS:
+        logger.debug(
+            "Truncating evidence from %d to %d chars in schema linker prompt",
+            len(safe_evidence), _MAX_EVIDENCE_CHARS,
+        )
+        safe_evidence = safe_evidence[:_MAX_EVIDENCE_CHARS] + "..."
+
     # Build lookup structures
     available_field_set: set[tuple[str, str]] = {
         (t, c) for t, c, _ss, _ls in available_fields
@@ -470,7 +483,18 @@ async def link_schema(
     # ------------------------------------------------------------------
     # Step 6.1 — FAISS pre-filtering + schema-hint augmentation
     # ------------------------------------------------------------------
-    faiss_results: list["FieldMatch"] = faiss_index.query(question, top_k=settings.faiss_top_k)
+    # Catch OSError (includes BrokenPipeError) from SentenceTransformer model
+    # load writing to a broken stdout/stderr pipe. Log as CRITICAL; fall back
+    # to an empty candidate list so the S1/S2 LLM calls use full DDL context.
+    try:
+        faiss_results: list["FieldMatch"] = faiss_index.query(question, top_k=settings.faiss_top_k)
+    except OSError as exc:
+        logger.critical(
+            "FAISS pre-filter query OS error (broken pipe?): %s — "
+            "falling back to empty candidate list",
+            exc,
+        )
+        faiss_results = []
 
     seen_keys: set[tuple[str, str]] = set()
     candidates: list[tuple[str, str, str, str]] = []  # (table, col, short, long)
@@ -524,8 +548,8 @@ async def link_schema(
     # Step 6.2 — Iteration 1: Precise Selection (S₁)
     # ------------------------------------------------------------------
     user_msg_s1 = (
-        f"Question: {question}\n"
-        f"Evidence: {evidence_str}\n"
+        f"Question: {safe_question}\n"
+        f"Evidence: {safe_evidence}\n"
         f"Matched values:\n{formatted_cells}\n\n"
         "Select only columns DEFINITELY needed to answer this question. "
         "Select at most 20 of the most relevant fields. "
@@ -544,10 +568,21 @@ async def link_schema(
             messages=[{"role": "user", "content": user_msg_s1}],
             tools=[_SELECT_COLUMNS_TOOL],
             tool_choice_name="select_columns",
-            max_tokens=2000,
+            max_tokens=8192,
             temperature=0.0,
         )
-        s1_raw: list[dict] = response_s1.tool_inputs[0].get("selected_fields", []) if response_s1.tool_inputs else []
+        if response_s1.tool_inputs:
+            raw_s1 = response_s1.tool_inputs[0].get("selected_fields", [])
+            if not isinstance(raw_s1, list):
+                logger.warning(
+                    "Schema linker S1: 'selected_fields' is not a list (%r); treating as empty",
+                    type(raw_s1).__name__,
+                )
+                raw_s1 = []
+            s1_raw: list[dict] = [f for f in raw_s1 if isinstance(f, dict)]
+        else:
+            logger.warning("Schema linker S1: no tool_inputs in response; using FAISS fallback")
+            s1_raw = []
     except LLMError as exc:
         logger.error(
             "Schema linker S1 LLM call failed (%s); falling back to FAISS top-15 as S1.", exc
@@ -625,7 +660,15 @@ async def link_schema(
     # is large or if the column name is ambiguous.
     _HIGH_CONF_S1_THRESHOLD = 0.8
     for hint in grounding_context.schema_hints:
-        hint_results = faiss_index.query(hint, top_k=3)
+        try:
+            hint_results = faiss_index.query(hint, top_k=3)
+        except OSError as exc:
+            logger.critical(
+                "FAISS hint query OS error (broken pipe?): %s — skipping hint %r",
+                exc,
+                hint,
+            )
+            continue
         for fm in hint_results:
             if fm.similarity_score >= _HIGH_CONF_S1_THRESHOLD:
                 key = (fm.table, fm.column)
@@ -700,8 +743,8 @@ async def link_schema(
         )
 
         user_msg_s2 = (
-            f"Question: {question}\n"
-            f"Evidence: {evidence_str}\n"
+            f"Question: {safe_question}\n"
+            f"Evidence: {safe_evidence}\n"
             f"Matched values:\n{formatted_cells}\n\n"
             "Select columns that MIGHT be needed to answer this question "
             "(cast a wider net — include columns that could be relevant). "
@@ -718,10 +761,21 @@ async def link_schema(
                 messages=[{"role": "user", "content": user_msg_s2}],
                 tools=[_SELECT_COLUMNS_TOOL],
                 tool_choice_name="select_columns",
-                max_tokens=2000,
+                max_tokens=8192,
                 temperature=0.0,
             )
-            s2_raw: list[dict] = response_s2.tool_inputs[0].get("selected_fields", []) if response_s2.tool_inputs else []
+            if response_s2.tool_inputs:
+                raw_s2 = response_s2.tool_inputs[0].get("selected_fields", [])
+                if not isinstance(raw_s2, list):
+                    logger.warning(
+                        "Schema linker S2: 'selected_fields' is not a list (%r); treating as empty",
+                        type(raw_s2).__name__,
+                    )
+                    raw_s2 = []
+                s2_raw: list[dict] = [f for f in raw_s2 if isinstance(f, dict)]
+            else:
+                logger.warning("Schema linker S2: no tool_inputs in response; using S1 as S2")
+                s2_raw = []
         except LLMError as exc:
             logger.error(
                 "Schema linker S2 LLM call failed (%s); using S1 as S2 fallback.", exc
