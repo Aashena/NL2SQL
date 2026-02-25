@@ -15,12 +15,13 @@ Both schemas are rendered as filtered DDL and Markdown using the full schema tex
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
-from src.llm import get_client, CacheableText, LLMError, ToolParam, sanitize_prompt_text
+from src.llm import get_client, CacheableText, LLMClient, LLMError, ToolParam, sanitize_prompt_text
 from src.config.settings import settings
 
 if TYPE_CHECKING:
@@ -419,6 +420,76 @@ def _build_all_available(
 
 
 # ---------------------------------------------------------------------------
+# Text-based S₂ fallback (used when tool-use exhausts all MAX_TOKENS retries)
+# ---------------------------------------------------------------------------
+
+def _parse_text_json_fields(text: str) -> list[dict]:
+    """
+    Parse a JSON field list from a plain-text LLM response.
+
+    Handles both raw JSON arrays and arrays wrapped in markdown code fences
+    (```json ... ``` or ``` ... ```).
+    """
+    # Strip markdown code fences if present
+    stripped = re.sub(r"```(?:json)?\s*([\s\S]*?)```", r"\1", text).strip()
+    # Locate the outermost JSON array
+    m = re.search(r"\[[\s\S]*\]", stripped)
+    if m:
+        try:
+            data = json.loads(m.group(0))
+            if isinstance(data, list):
+                return [f for f in data if isinstance(f, dict)]
+        except json.JSONDecodeError:
+            pass
+    logger.warning(
+        "S2 text fallback: could not parse JSON array from response (first 300 chars): %r",
+        text[:300],
+    )
+    return []
+
+
+async def _s2_text_fallback(
+    client: LLMClient,
+    system_block_1: CacheableText,
+    system_block_2_remaining: CacheableText,
+    user_msg_s2: str,
+) -> list[dict]:
+    """
+    Text-based fallback for S₂ schema linking.
+
+    Called when the tool-use S₂ call exhausts all MAX_TOKENS escalations and
+    still returns no output.  Sends the same prompt without tools and asks the
+    model to respond with a plain JSON array so the larger output budget is not
+    consumed by the function-call envelope.
+    """
+    text_prompt = (
+        user_msg_s2
+        + "\n\nRespond with ONLY a raw JSON array — no markdown code fences, "
+        "no explanation, nothing else. Format:\n"
+        '[{"table": "t", "column": "c", "reason": "...", '
+        '"role": "select|where|join|group_by|order_by"}]'
+    )
+    try:
+        response = await client.generate(
+            model=settings.model_powerful_list,
+            system=[system_block_1, system_block_2_remaining],
+            messages=[{"role": "user", "content": text_prompt}],
+            tools=[],
+            max_tokens=32768,
+            temperature=0.0,
+        )
+        if response.text:
+            fields = _parse_text_json_fields(response.text)
+            logger.debug(
+                "S2 text fallback: parsed %d fields from plain-text response", len(fields)
+            )
+            return fields
+    except LLMError as exc:
+        logger.warning("S2 text-based fallback also failed (%s); using S1 as S2", exc)
+    return []
+
+
+# ---------------------------------------------------------------------------
 # Main async function
 # ---------------------------------------------------------------------------
 
@@ -487,7 +558,7 @@ async def link_schema(
     # load writing to a broken stdout/stderr pipe. Log as CRITICAL; fall back
     # to an empty candidate list so the S1/S2 LLM calls use full DDL context.
     try:
-        faiss_results: list["FieldMatch"] = faiss_index.query(question, top_k=settings.faiss_top_k)
+        faiss_results: list["FieldMatch"] = faiss_index.query(question, top_k=settings.schema_linker_faiss_top_k)
     except OSError as exc:
         logger.critical(
             "FAISS pre-filter query OS error (broken pipe?): %s — "
@@ -773,6 +844,21 @@ async def link_schema(
                     )
                     raw_s2 = []
                 s2_raw: list[dict] = [f for f in raw_s2 if isinstance(f, dict)]
+            elif response_s2.finish_reason and "MAX_TOKENS" in str(response_s2.finish_reason):
+                # Tool-use call exhausted all client-level MAX_TOKENS escalations and still
+                # returned no output.  Fall back to a plain-text request so the function-call
+                # overhead doesn't consume the token budget.
+                logger.warning(
+                    "Schema linker S2: MAX_TOKENS after all token escalations "
+                    "(finish_reason=%s); trying text-based fallback",
+                    response_s2.finish_reason,
+                )
+                s2_raw = await _s2_text_fallback(
+                    client=client,
+                    system_block_1=system_block_1,
+                    system_block_2_remaining=system_block_2_remaining,
+                    user_msg_s2=user_msg_s2,
+                )
             else:
                 logger.warning("Schema linker S2: no tool_inputs in response; using S1 as S2")
                 s2_raw = []

@@ -63,7 +63,11 @@ class ICLGenerator:
         base_prompt = build_base_prompt(question, evidence, grounding.matched_cells)
 
         # Build system prompt blocks
-        # Block 1: instruction + S2 schema (not cached — schema varies per question)
+        # Both blocks are cache=True so they are merged into a single CachedContent object.
+        # This avoids the Gemini API restriction that forbids setting system_instruction
+        # in GenerateContent when cached_content is also present.
+        # The cache key includes the schema (which varies per question), so there is no
+        # cross-question reuse — but C1/C2/C3 within the same question all share the cache.
         instruction_block = CacheableText(
             text=(
                 "You are an expert SQL writer. Given a database schema, examples, and a question, "
@@ -71,7 +75,7 @@ class ICLGenerator:
                 "Database Schema:\n"
                 f"{schemas.s2_markdown}"
             ),
-            cache=False,
+            cache=True,
         )
         # Block 2: few-shot examples (cached — same examples reused across C1/C2/C3)
         examples_block = CacheableText(
@@ -131,53 +135,71 @@ class ICLGenerator:
         instruction: str,
         temperature: float = 0.7,
     ) -> SQLCandidate:
-        """Generate a single ICL candidate."""
+        """Generate a single ICL candidate.
+
+        Retries with doubled max_tokens on MAX_TOKENS finish reason, up to a cap
+        of 32768 tokens (attempts: 8192 → 16384 → 32768, then give up).
+        """
         # Combine base prompt with per-variant instruction
         user_prompt = f"{base_prompt}\n\n{instruction}"
 
         client = get_client()
-        try:
-            response = await client.generate(
-                model=settings.model_powerful_list,
-                system=system_blocks,
-                messages=[{"role": "user", "content": user_prompt}],
-                tools=[],
-                tool_choice_name=None,
-                thinking=None,
-                max_tokens=4096,  # increased from 2000: gemini-2.5-pro needs headroom for implicit reasoning
-                temperature=temperature,
-            )
-        except Exception as exc:
-            logger.error("ICLGenerator %s failed: %s", candidate_id, exc)
-            return SQLCandidate(
-                sql="",
-                generator_id=candidate_id,
-                schema_used="s2",
-                schema_format="markdown",
-                reasoning_trace=None,
-                error_flag=True,
-            )
+        max_tokens = 8192
+        _MAX_TOKENS_CAP = 32768
+
+        while True:
+            try:
+                response = await client.generate(
+                    model=settings.model_powerful_list,
+                    system=system_blocks,
+                    messages=[{"role": "user", "content": user_prompt}],
+                    tools=[],
+                    tool_choice_name=None,
+                    thinking=None,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+            except Exception as exc:
+                logger.error("ICLGenerator %s failed: %s", candidate_id, exc)
+                return SQLCandidate(
+                    sql="",
+                    generator_id=candidate_id,
+                    schema_used="s2",
+                    schema_format="markdown",
+                    reasoning_trace=None,
+                    error_flag=True,
+                )
+
+            # Retry with doubled max_tokens if response was truncated.
+            # A truncated SQL always fails SQLite; retrying is cheaper than discarding.
+            if "MAX_TOKENS" in str(response.finish_reason):
+                next_tokens = max_tokens * 2
+                if next_tokens > _MAX_TOKENS_CAP:
+                    logger.warning(
+                        "ICLGenerator %s: MAX_TOKENS at cap %d, discarding truncated response",
+                        candidate_id,
+                        max_tokens,
+                    )
+                    return SQLCandidate(
+                        sql="",
+                        generator_id=candidate_id,
+                        schema_used="s2",
+                        schema_format="markdown",
+                        reasoning_trace=None,
+                        error_flag=True,
+                    )
+                logger.warning(
+                    "ICLGenerator %s: MAX_TOKENS at %d tokens, retrying with %d",
+                    candidate_id,
+                    max_tokens,
+                    next_tokens,
+                )
+                max_tokens = next_tokens
+                continue
+
+            break
 
         raw_text = response.text
-
-        # Detect and discard truncated responses: finish_reason=MAX_TOKENS with
-        # partial text means the SQL was cut off mid-statement.  A truncated SQL
-        # always fails SQLite with "incomplete input"; better to mark error_flag
-        # than to pass broken SQL to the query fixer.
-        if "MAX_TOKENS" in str(response.finish_reason):
-            logger.warning(
-                "ICLGenerator %s: response truncated at MAX_TOKENS "
-                "(partial text discarded)",
-                candidate_id,
-            )
-            return SQLCandidate(
-                sql="",
-                generator_id=candidate_id,
-                schema_used="s2",
-                schema_format="markdown",
-                reasoning_trace=None,
-                error_flag=True,
-            )
 
         if raw_text is None:
             logger.warning(

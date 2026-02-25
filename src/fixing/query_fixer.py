@@ -102,7 +102,8 @@ def _error_instruction(
     if category == _ERR_EMPTY:
         return (
             "The query returned no rows. "
-            "Review the WHERE conditions — they may be too restrictive."
+            "Review the WHERE conditions — they may be too restrictive. "
+            "Or maybe you should try a different join approach."
         )
     return f"Fix the following error: {error_message}"
 

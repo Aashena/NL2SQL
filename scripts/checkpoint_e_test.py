@@ -80,14 +80,16 @@ _OUTPUT_DIR = _BASE / "checkpoint_E_review"
 # Grounding: fast LSH + FAISS lookup, no LLM
 _TIMEOUT_GROUNDING = 30
 # Schema linking: up to 2 gemini-2.5-pro calls; wide schemas (115+ cols) can
-# take 60-90s for S1 alone, hence the 120s budget here.
-_TIMEOUT_SCHEMA_LINKING = 120
+# take 60-90s for S1 alone. With 3 retries + exponential backoff the worst-case
+# wall time is ~3×60 + 32 ≈ 212s, so 300s gives comfortable headroom.
+_TIMEOUT_SCHEMA_LINKING = 300
 # Generation: 11 candidates run concurrently (4 reasoning + 2 standard +
-# 2 complex + 3 ICL); reasoning uses extended thinking so allow 90s.
-_TIMEOUT_GENERATION = 90
+# 2 complex + 3 ICL); reasoning uses extended thinking so allow 300s to
+# handle Gemini API latency variability (was 120s, caused 4/33 timeouts).
+_TIMEOUT_GENERATION = 300
 # Fixing: β=2 iterations × ~15s each per candidate, but candidates are fixed
-# concurrently; 45s covers the common case.
-_TIMEOUT_FIXING = 45
+# concurrently; 120s covers 11 concurrent candidates × β=2 with API latency headroom.
+_TIMEOUT_FIXING = 120
 # Selection: fast_path is instant; tournament pairwise calls ~5s each × ~5
 # comparisons = 25s max. 45s gives comfortable headroom.
 _TIMEOUT_SELECTION = 45
@@ -208,25 +210,41 @@ def _extract_required_tables_columns(gold_sql: str) -> tuple[set, set]:
     """
     Extract required tables and (table, column) pairs from a gold SQL query.
 
+    Only real table names (from FROM/JOIN clauses) are included in required_tables.
+    SQL aliases such as T1, T2, t, s, etc. are excluded from required_tables but
+    their column references are still tracked in table_cols so that the bare-column
+    fallback in _compute_schema_recall can match them.
+
     Returns:
         (required_tables: set[str], required_cols: set[tuple[str, str]])
         where required_cols contains (table_lower, column_lower) pairs.
     """
-    # Extract table names from FROM and JOIN clauses (handles aliases too)
+    # Alias pattern: single letter optionally followed by digits (t, t1, t2, s, a, b, ...).
+    # This covers the overwhelming majority of SQL alias styles used in BIRD gold SQL.
+    _ALIAS_RE = re.compile(r'^[a-z]\d*$', re.IGNORECASE)
+
+    # Extract REAL table names from FROM and JOIN clauses.
+    # The token immediately after FROM/JOIN is always the real table name; aliases
+    # appear later after AS, so they are not captured here.
     tables: set[str] = set()
     for m in re.finditer(r'(?:FROM|JOIN)\s+(\w+)', gold_sql, re.IGNORECASE):
-        tables.add(m.group(1).lower())
+        name = m.group(1).lower()
+        # Guard against edge-case keywords (subquery or LATERAL keyword after FROM)
+        if name not in ('select', 'lateral', 'as'):
+            tables.add(name)
 
-    # Extract table.column patterns (e.g. T1.col or schools.CDCode)
+    # Extract table.column patterns (e.g. T1.col or schools.CDSCode).
+    # Always track the column reference; only add the table prefix to required_tables
+    # when it is NOT an alias (so aliases like T1, t2 don't inflate the denominator).
     table_cols: set[tuple[str, str]] = set()
     for m in re.finditer(r'(\w+)\.(\w+)', gold_sql):
         t_name = m.group(1).lower()
         c_name = m.group(2).lower()
-        # Skip numeric patterns and pure alias patterns (T1, T2, etc.)
-        if not t_name.isdigit() and not c_name.isdigit():
-            # If table looks like an alias (T1, t1, t2 ...), still track it
+        if t_name.isdigit() or c_name.isdigit():
+            continue
+        table_cols.add((t_name, c_name))
+        if not _ALIAS_RE.match(t_name):
             tables.add(t_name)
-            table_cols.add((t_name, c_name))
 
     return tables, table_cols
 
