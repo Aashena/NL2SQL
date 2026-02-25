@@ -44,6 +44,7 @@ class Settings(BaseSettings):
 
     # Schema linking
     faiss_top_k: int = 30
+    schema_linker_faiss_top_k: int = 50
     lsh_top_k: int = 5
 
     # Selection

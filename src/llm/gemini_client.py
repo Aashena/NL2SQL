@@ -93,8 +93,18 @@ class GeminiClient(LLMClient):
         cacheable_blocks = [b for b in system if b.cache]
         non_cacheable_blocks = [b for b in system if not b.cache]
 
+        # Gemini API restriction: when cached_content is present in GenerateContent,
+        # the request must NOT also set system_instruction, tools, or tool_config.
+        # We can only safely use caching when:
+        #   (a) all system blocks are cacheable (no non_cacheable_blocks) — avoids
+        #       the system_instruction conflict
+        #   (b) no explicit tools are needed — avoids the tools/tool_config conflict
+        # Schema linker (has tools) and any mixed-block caller bypass caching here;
+        # the fallback path below sends everything as a plain system_instruction.
+        can_use_cache = bool(cacheable_blocks) and not non_cacheable_blocks and not tool_defs
+
         cache_name: Optional[str] = None
-        if cacheable_blocks:
+        if can_use_cache:
             cacheable_text = "\n\n".join(b.text for b in cacheable_blocks)
             cache_key = hashlib.sha256(f"{model}:{cacheable_text}".encode()).hexdigest()
 
@@ -116,26 +126,17 @@ class GeminiClient(LLMClient):
 
         # --- Build GenerateContentConfig ---
         if cache_name is not None:
-            # Cached content already contains the cacheable system text
-            if non_cacheable_blocks:
-                non_cacheable_text = "\n\n".join(b.text for b in non_cacheable_blocks)
-                gen_config = types.GenerateContentConfig(
-                    system_instruction=non_cacheable_text,
-                    cached_content=cache_name,
-                    max_output_tokens=max_tokens,
-                    temperature=temperature,
-                    **tool_kwargs,
-                )
-            else:
-                # No non-cacheable blocks — omit system_instruction entirely
-                gen_config = types.GenerateContentConfig(
-                    cached_content=cache_name,
-                    max_output_tokens=max_tokens,
-                    temperature=temperature,
-                    **tool_kwargs,
-                )
+            # can_use_cache guarantees: no non_cacheable_blocks, no tool_defs.
+            # GenerateContent must only set cached_content — no system_instruction or tools.
+            gen_config = types.GenerateContentConfig(
+                cached_content=cache_name,
+                max_output_tokens=max_tokens,
+                temperature=temperature,
+                **tool_kwargs,
+            )
         else:
-            # Fall back to current behavior: combine all system blocks
+            # No cache (either bypass or cache creation failed): combine all system blocks
+            # into a plain system_instruction alongside any tools.
             system_instruction = "\n\n".join(b.text for b in system)
             gen_config = types.GenerateContentConfig(
                 system_instruction=system_instruction,
@@ -155,16 +156,30 @@ class GeminiClient(LLMClient):
                 raw = await self._call_with_retry(model=model, contents=contents, config=gen_config)
             parsed = _parse_response(raw)
 
-            # One-shot retry with doubled token budget when the model was truncated before
-            # producing any output (finish_reason=MAX_TOKENS, no text, no tool calls).
-            if parsed.text is None and not parsed.tool_inputs and "MAX_TOKENS" in str(parsed.finish_reason):
-                retry_max = min(max_tokens * 2, 8192)
+            # Multi-step MAX_TOKENS retry: up to 3 escalations, each doubling max_tokens.
+            # The old one-shot retry used min(max_tokens * 2, 8192), which was a no-op when
+            # max_tokens was already 8192 (e.g. schema linker S2 calls). We now escalate
+            # without an artificial cap so 8192 → 16384 → 32768 are all tried.
+            _MAX_TOKEN_ESCALATIONS = 3
+            _current_max = max_tokens
+            for _attempt in range(_MAX_TOKEN_ESCALATIONS):
+                if not (
+                    parsed.text is None
+                    and not parsed.tool_inputs
+                    and "MAX_TOKENS" in str(parsed.finish_reason)
+                ):
+                    break
+                _retry_max = _current_max * 2
                 logger.warning(
-                    "MAX_TOKENS hit with no output (max_tokens=%d); retrying with max_tokens=%d",
-                    max_tokens,
-                    retry_max,
+                    "MAX_TOKENS hit with no output "
+                    "(escalation %d/%d, max_tokens=%d → %d); retrying",
+                    _attempt + 1,
+                    _MAX_TOKEN_ESCALATIONS,
+                    _current_max,
+                    _retry_max,
                 )
-                gen_config.max_output_tokens = retry_max
+                _current_max = _retry_max
+                gen_config.max_output_tokens = _current_max
                 async with self._get_semaphore():
                     raw = await self._call_with_retry(model=model, contents=contents, config=gen_config)
                 parsed = _parse_response(raw)

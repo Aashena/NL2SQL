@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Optional
 
 from src.config.settings import settings
 from src.data.database import ExecutionResult, execute_sql
-from src.llm import CacheableText, LLMError, ToolParam, get_client
+from src.llm import CacheableText, LLMError, ToolParam, get_client, sanitize_prompt_text
 
 if TYPE_CHECKING:
     from src.fixing.query_fixer import FixedCandidate
@@ -52,7 +52,10 @@ class SelectionResult:
 
 _SELECT_WINNER_TOOL = ToolParam(
     name="select_winner",
-    description="Select the better SQL candidate",
+    description=(
+        "Select the SQL candidate that better answers the question. "
+        "Consider execution results, row counts, column values, and SQL correctness."
+    ),
     input_schema={
         "type": "object",
         "properties": {
@@ -113,6 +116,188 @@ def _cluster_key(rows: list) -> str:
     ]
     sorted_rows = sorted(normalized_rows)
     return str(sorted_rows)
+
+
+# ---------------------------------------------------------------------------
+# Execution result formatting helpers
+# ---------------------------------------------------------------------------
+
+def _extract_column_names(sql: str) -> list[str]:
+    """
+    Extract column names / aliases from the SELECT clause of a SQL query.
+
+    Handles common patterns:
+    - Simple columns: ``SELECT a, b FROM t`` → ``["a", "b"]``
+    - Table-prefixed: ``SELECT T1.col FROM t`` → ``["col"]``
+    - AS aliases: ``SELECT T1.x AS alias FROM t`` → ``["alias"]``
+    - Expressions with AS: ``SELECT COUNT(id) AS cnt FROM t`` → ``["cnt"]``
+
+    Returns an empty list if ``SELECT *`` is detected or parsing fails.
+    The list is used only for display purposes in the tournament prompt.
+    """
+    import re
+
+    sql_clean = sql.strip().rstrip(";")
+
+    # Locate SELECT keyword
+    m = re.match(r"SELECT\s+", sql_clean, re.IGNORECASE)
+    if not m:
+        return []
+
+    start = m.end()
+
+    # Walk to the first top-level FROM (respecting parenthesis depth)
+    depth = 0
+    end = len(sql_clean)
+    for i in range(start, len(sql_clean)):
+        c = sql_clean[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+        elif depth == 0 and re.match(r"\bFROM\b", sql_clean[i:], re.IGNORECASE):
+            end = i
+            break
+
+    sel = sql_clean[start:end].strip()
+
+    # Handle SELECT * / SELECT DISTINCT *
+    if re.fullmatch(r"DISTINCT\s+\*|\*", sel, re.IGNORECASE):
+        return []
+    sel = re.sub(r"^DISTINCT\s+", "", sel, flags=re.IGNORECASE)
+
+    # Split SELECT clause on top-level commas
+    exprs: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    for c in sel:
+        if c == "(":
+            depth += 1
+            buf.append(c)
+        elif c == ")":
+            depth -= 1
+            buf.append(c)
+        elif c == "," and depth == 0:
+            exprs.append("".join(buf).strip())
+            buf = []
+        else:
+            buf.append(c)
+    if buf:
+        exprs.append("".join(buf).strip())
+
+    # SQL keyword set to skip when falling back to last-identifier heuristic
+    _SKIP = {
+        "AS", "FROM", "WHERE", "AND", "OR", "NOT", "NULL", "IS", "IN", "LIKE",
+        "BETWEEN", "CASE", "WHEN", "THEN", "ELSE", "END", "CAST", "INTEGER",
+        "REAL", "TEXT", "BLOB", "NUMERIC", "DISTINCT", "TOP", "LIMIT", "OFFSET",
+    }
+
+    names: list[str] = []
+    for expr in exprs:
+        expr = expr.strip()
+        if not expr:
+            continue
+
+        # Find AS <alias> at parenthesis depth 0 by walking character by character
+        alias: Optional[str] = None
+        depth = 0
+        for i, c in enumerate(expr):
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+            elif depth == 0:
+                # Only check at a word boundary (prev char is not alphanumeric / underscore)
+                prev = expr[i - 1] if i > 0 else " "
+                if not (prev.isalnum() or prev == "_"):
+                    am = re.match(r"AS\s+(\w+)\s*$", expr[i:], re.IGNORECASE)
+                    if am:
+                        alias = am.group(1)
+                        break
+
+        if alias:
+            names.append(alias)
+        else:
+            # Fall back: table.column pattern at end of expression
+            dm = re.search(r"\.(\w+)\s*$", expr)
+            if dm:
+                names.append(dm.group(1))
+            else:
+                idents = [
+                    x
+                    for x in re.findall(r"\b([A-Za-z_]\w*)\b", expr)
+                    if x.upper() not in _SKIP
+                ]
+                names.append(idents[-1] if idents else f"col_{len(names) + 1}")
+
+    return names
+
+
+def _format_execution_result(
+    result: "ExecutionResult",
+    sql: str,
+    max_rows: int = 5,
+) -> str:
+    """
+    Format an execution result as a human-readable block for the tournament prompt.
+
+    Includes:
+    - Total row count with a truncation notice when rows are clipped
+    - Column names extracted from the SQL SELECT clause
+    - First ``max_rows`` rows rendered as a simple text table
+    """
+    if not result.success:
+        return f"Execution error: {result.error}"
+
+    if result.is_empty:
+        return "Query returned 0 rows."
+
+    total_rows = len(result.rows)
+    sample = result.rows[:max_rows]
+
+    # Determine column count from the first row
+    ncols = len(sample[0]) if sample and isinstance(sample[0], (tuple, list)) else 1
+
+    col_names = _extract_column_names(sql)
+    # Pad or trim to match actual column count
+    while len(col_names) < ncols:
+        col_names.append(f"col_{len(col_names) + 1}")
+    col_names = col_names[:ncols]
+
+    _MAX_VAL = 20
+
+    def _fmt(v) -> str:
+        s = "NULL" if v is None else str(v)
+        return s if len(s) <= _MAX_VAL else s[: _MAX_VAL - 3] + "..."
+
+    # Compute column display widths (header vs. content, capped at _MAX_VAL)
+    widths = [len(cn) for cn in col_names]
+    for row in sample:
+        vals = row if isinstance(row, (tuple, list)) else (row,)
+        for i, v in enumerate(vals[:ncols]):
+            widths[i] = min(max(widths[i], len(_fmt(v))), _MAX_VAL)
+
+    header = " | ".join(cn.ljust(widths[i]) for i, cn in enumerate(col_names))
+    sep = "-+-".join("-" * w for w in widths)
+
+    lines: list[str] = []
+    if total_rows > max_rows:
+        lines.append(f"Total rows: {total_rows} (showing first {max_rows})")
+    else:
+        lines.append(f"Total rows: {total_rows}")
+    lines.append(f"Columns: {', '.join(col_names)}")
+    lines.append(header)
+    lines.append(sep)
+
+    for row in sample:
+        vals = row if isinstance(row, (tuple, list)) else (row,)
+        cells = [
+            _fmt(vals[i] if i < len(vals) else "").ljust(widths[i])
+            for i in range(ncols)
+        ]
+        lines.append(" | ".join(cells))
+
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -270,26 +455,39 @@ class AdaptiveSelector:
             idx_b: int,
         ) -> Optional[str]:
             """Run a single pairwise comparison; return generator_id of winner."""
-            _, cand_a, result_a, _ = representatives[idx_a]
-            _, cand_b, result_b, _ = representatives[idx_b]
+            _, cand_a, result_a, size_a = representatives[idx_a]
+            _, cand_b, result_b, size_b = representatives[idx_b]
 
-            result_a_str = str(result_a.rows[:20]) if result_a.success else f"Error: {result_a.error}"
-            result_b_str = str(result_b.rows[:20]) if result_b.success else f"Error: {result_b.error}"
+            result_a_str = _format_execution_result(result_a, cand_a.final_sql)
+            result_b_str = _format_execution_result(result_b, cand_b.final_sql)
+
+            # Sanitize user-supplied and LLM-generated text before embedding in a
+            # tool-use prompt.  Gemini's function-call parser fails (MALFORMED_FUNCTION_CALL)
+            # on backtick-quoted identifiers and control characters — the same fix
+            # that was applied to schema_linker.py and context_grounder.py.
+            safe_question = sanitize_prompt_text(question)
+            safe_evidence = sanitize_prompt_text(evidence or "None")
+            safe_sql_a = sanitize_prompt_text(cand_a.final_sql)
+            safe_sql_b = sanitize_prompt_text(cand_b.final_sql)
 
             prompt = (
                 "You are evaluating two SQL queries for a natural language question. "
                 "Choose which query better answers the question based on the schema "
                 "and execution results.\n\n"
-                f"Question: {question}\n"
-                f"Evidence: {evidence or 'None'}\n"
-                f"Database Schema (filtered):\n{schemas.s1_markdown}\n\n"
+                f"Question: {safe_question}\n"
+                f"Evidence: {safe_evidence}\n"
+                f"Database Schema (filtered):\n{schemas.s2_markdown}\n\n"
                 f"Candidate A (generated by {cand_a.generator_id}):\n"
-                f"{cand_a.final_sql}\n"
-                f"Execution result: {result_a_str}\n\n"
+                f"{safe_sql_a}\n\n"
+                f"=== Candidate A Execution Result ===\n"
+                f"{result_a_str}\n\n"
                 f"Candidate B (generated by {cand_b.generator_id}):\n"
-                f"{cand_b.final_sql}\n"
-                f"Execution result: {result_b_str}\n\n"
-                "Which candidate better answers the question? Reply with just \"A\" or \"B\"."
+                f"{safe_sql_b}\n\n"
+                f"=== Candidate B Execution Result ===\n"
+                f"{result_b_str}\n\n"
+                "Given the question, evidence, schema, and both execution results above, "
+                "which SQL better answers the question? "
+                "Consider: row counts, column values, and the correctness of the SQL logic."
             )
 
             try:

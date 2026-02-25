@@ -20,7 +20,13 @@ from src.data.database import ExecutionResult
 from src.fixing.query_fixer import FixedCandidate
 from src.llm.base import LLMResponse
 from src.schema_linking.schema_linker import LinkedSchemas
-from src.selection.adaptive_selector import AdaptiveSelector, SelectionResult, _generator_rank
+from src.selection.adaptive_selector import (
+    AdaptiveSelector,
+    SelectionResult,
+    _extract_column_names,
+    _format_execution_result,
+    _generator_rank,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -678,3 +684,117 @@ async def test_empty_result_cluster_deprioritized():
     assert result.final_sql == "SELECT id FROM t", (
         f"Expected non-empty result winner, got {result.final_sql!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Tests for _extract_column_names
+# ---------------------------------------------------------------------------
+
+def test_extract_column_names_simple():
+    """Simple column list without aliases."""
+    assert _extract_column_names("SELECT a, b FROM t") == ["a", "b"]
+
+
+def test_extract_column_names_with_as_alias():
+    """AS aliases are returned, not original expression tokens."""
+    sql = "SELECT T1.molecule_id AS mid, T2.element AS elem FROM atom JOIN molecule"
+    names = _extract_column_names(sql)
+    assert names == ["mid", "elem"]
+
+
+def test_extract_column_names_table_prefix_no_alias():
+    """Table-prefixed columns without AS yield the column part only."""
+    sql = "SELECT T1.col_a, T2.col_b FROM t1 JOIN t2 ON t1.id = t2.id"
+    names = _extract_column_names(sql)
+    assert names == ["col_a", "col_b"]
+
+
+def test_extract_column_names_star_returns_empty():
+    """SELECT * → empty list (caller uses positional fallback)."""
+    assert _extract_column_names("SELECT * FROM t") == []
+    assert _extract_column_names("SELECT DISTINCT * FROM t") == []
+
+
+def test_extract_column_names_with_aggregate_alias():
+    """Aggregate functions with AS alias are handled."""
+    sql = "SELECT COUNT(DISTINCT id) AS cnt, name FROM t"
+    names = _extract_column_names(sql)
+    assert names == ["cnt", "name"]
+
+
+def test_extract_column_names_cast_expression():
+    """CAST with AS inside parens does not pollute alias detection."""
+    sql = "SELECT CAST(x AS REAL) AS score, label FROM t"
+    names = _extract_column_names(sql)
+    assert names == ["score", "label"]
+
+
+def test_extract_column_names_not_select_returns_empty():
+    """Non-SELECT statement returns empty list."""
+    assert _extract_column_names("UPDATE t SET x = 1") == []
+
+
+# ---------------------------------------------------------------------------
+# Tests for _format_execution_result
+# ---------------------------------------------------------------------------
+
+def test_format_execution_result_error():
+    """Error results display the error message."""
+    result = _make_exec_result([], success=False, error="no such table: foo")
+    out = _format_execution_result(result, "SELECT * FROM foo")
+    assert "no such table: foo" in out
+    assert "Execution error" in out
+
+
+def test_format_execution_result_empty():
+    """Empty results display 0 rows."""
+    result = _make_exec_result([], success=True, is_empty=True)
+    out = _format_execution_result(result, "SELECT id FROM t WHERE id = 999")
+    assert "generator(s) agreed" not in out
+    assert "0 rows" in out
+
+
+def test_format_execution_result_normal_includes_agreement():
+    """Normal results include row count and column names (no agreement count)."""
+    result = _make_exec_result([(1, "alice"), (2, "bob")])
+    out = _format_execution_result(result, "SELECT id, name FROM t")
+    assert "generator(s) agreed" not in out
+    assert "Total rows: 2" in out
+    assert "id" in out
+    assert "name" in out
+    assert "alice" in out
+    assert "bob" in out
+
+
+def test_format_execution_result_truncation_notice():
+    """When rows exceed max_rows, a truncation notice is shown."""
+    rows = [(i,) for i in range(10)]
+    result = _make_exec_result(rows)
+    out = _format_execution_result(result, "SELECT id FROM t", max_rows=5)
+    assert "Total rows: 10" in out
+    assert "showing first 5" in out
+    # Only first 5 rows should appear as data
+    assert "9" not in out  # row index 9 is beyond max_rows
+
+
+def test_format_execution_result_no_truncation_when_within_limit():
+    """When rows fit within max_rows, no truncation notice appears."""
+    result = _make_exec_result([(1,), (2,), (3,)])
+    out = _format_execution_result(result, "SELECT id FROM t", max_rows=5)
+    assert "Total rows: 3" in out
+    assert "showing first" not in out
+
+
+def test_format_execution_result_null_values():
+    """NULL values in rows are displayed as 'NULL'."""
+    result = _make_exec_result([(1, None), (2, None)])
+    out = _format_execution_result(result, "SELECT id, val FROM t")
+    assert "NULL" in out
+
+
+def test_format_execution_result_prompt_integration():
+    """Verify that _format_execution_result renders column names and values."""
+    result = _make_exec_result([(42,)])
+    out = _format_execution_result(result, "SELECT COUNT(*) AS total FROM t")
+    assert "generator(s) agreed" not in out
+    assert "total" in out.lower() or "col_1" in out.lower()
