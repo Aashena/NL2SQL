@@ -16,9 +16,11 @@ from src.llm.base import (
     CacheableText,
     LLMClient,
     LLMError,
+    LLMMalformedToolError,
     LLMRateLimitError,
     LLMResponse,
     ToolParam,
+    sanitize_prompt_text,
 )
 from src.llm.anthropic_client import AnthropicClient
 from src.llm.gemini_client import _is_rate_limit_error
@@ -326,7 +328,10 @@ class TestSettingsModelLists:
         monkeypatch.delenv("MODEL_POWERFUL", raising=False)
         monkeypatch.setenv("LLM_PROVIDER", "anthropic")
         from src.config.settings import Settings
-        s = Settings()
+        # _env_file=None prevents pydantic-settings from reading the project .env
+        # file (which may contain MODEL_POWERFUL=<gemini model>), ensuring only the
+        # monkeypatched OS environment variables are in effect.
+        s = Settings(_env_file=None)
         assert s.model_powerful == "claude-sonnet-4-6"
         assert s.model_powerful_list == ["claude-sonnet-4-6"]
 
@@ -347,3 +352,58 @@ class TestSettingsModelLists:
         s = Settings()
         assert s.model_fast_list == ["haiku-v1", "haiku-v2"]
         assert s.model_fast == "haiku-v1"
+
+
+# ---------------------------------------------------------------------------
+# Tests: sanitize_prompt_text — strengthened transformations
+# ---------------------------------------------------------------------------
+
+class TestSanitizePromptText:
+
+    def test_double_quotes_replaced_with_single_quotes(self):
+        """Double-quotes in SQL identifier quoting become single-quotes."""
+        assert sanitize_prompt_text('SELECT "name" FROM t') == "SELECT 'name' FROM t"
+
+    def test_double_quotes_in_result_value(self):
+        """Double-quotes inside cell values are replaced."""
+        assert sanitize_prompt_text('value: "O\'Brien"') == "value: 'O'Brien'"
+
+    def test_lone_backslash_replaced_with_space(self):
+        """A lone backslash (not part of \\n/\\t/\\r/\\\\) becomes a space."""
+        result = sanitize_prompt_text("LIKE '%\\%'")
+        assert "\\" not in result or result.count("\\") == 0
+
+    def test_all_backslashes_replaced(self):
+        """All backslashes (including double-backslash sequences) are replaced with space."""
+        result = sanitize_prompt_text("path\\\\file")
+        assert "\\" not in result
+
+    def test_newline_preserved(self):
+        """Literal newline character is preserved (not a control char in the filtered range)."""
+        result = sanitize_prompt_text("line1\nline2")
+        assert "\n" in result
+
+    def test_tab_preserved(self):
+        """Literal tab character is preserved."""
+        result = sanitize_prompt_text("col1\tcol2")
+        assert "\t" in result
+
+    def test_backtick_still_converted(self):
+        """Pre-existing backtick → single-quote transformation is unchanged."""
+        assert sanitize_prompt_text("`col`") == "'col'"
+
+    def test_null_byte_replaced(self):
+        """Null bytes are replaced with space."""
+        assert sanitize_prompt_text("hello\x00world") == "hello world"
+
+    def test_empty_string_returned_unchanged(self):
+        """Empty string input returns empty string."""
+        assert sanitize_prompt_text("") == ""
+
+    def test_none_like_empty_returns_original(self):
+        """Falsy non-None input (empty string) returns as-is."""
+        assert sanitize_prompt_text("") == ""
+
+    def test_llm_malformed_tool_error_is_subclass_of_llm_error(self):
+        """LLMMalformedToolError is a subclass of LLMError (existing except clauses catch it)."""
+        assert issubclass(LLMMalformedToolError, LLMError)

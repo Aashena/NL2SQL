@@ -432,10 +432,10 @@ async def test_faiss_pre_filtering_top_k(mock_faiss_index, mock_grounding_contex
             available_fields=AVAILABLE_FIELDS,
         )
 
-    # First call: pre-filter on the question with configured top_k
+    # First call: pre-filter on the question with the schema-linker-specific top_k
     first_call = mock_faiss_index.query.call_args_list[0]
-    assert first_call == call(question, top_k=settings.faiss_top_k), (
-        f"First FAISS query call should use the question and top_k={settings.faiss_top_k}"
+    assert first_call == call(question, top_k=settings.schema_linker_faiss_top_k), (
+        f"First FAISS query call should use the question and top_k={settings.schema_linker_faiss_top_k}"
     )
 
     # Subsequent calls: one per schema_hint, each with top_k=3

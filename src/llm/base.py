@@ -12,6 +12,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from src.monitoring.fallback_tracker import FallbackEvent, get_tracker
+
 logger = logging.getLogger(__name__)
 
 
@@ -139,6 +141,18 @@ class LLMClient(ABC):
                         "Rate limit on model %r (attempt %d/%d); falling back to %r",
                         m, idx + 1, len(models), models[idx + 1],
                     )
+                    get_tracker().record(FallbackEvent(
+                        component="llm_base",
+                        trigger="rate_limit",
+                        action="model_fallback",
+                        details={
+                            "from_model": m,
+                            "to_model": models[idx + 1],
+                            "attempt": idx + 1,
+                            "total_models": len(models),
+                        },
+                        severity="warning",
+                    ))
             # Non-rate-limit LLMError propagates immediately (no except clause)
 
         raise last_exc  # type: ignore[misc]  # reached only when all models are exhausted
@@ -197,10 +211,19 @@ def sanitize_prompt_text(text: str) -> str:
       1. Backtick-quoted tokens → single-quoted:  `col` → 'col'
       2. Null bytes → space
       3. Non-printable control chars (except \\n \\t) → space
+      4. Double-quotes → single-quotes (prevents model from repeating them
+         verbatim inside JSON string values, which would produce malformed JSON)
+      5. All backslashes → space.
+         SQL LIKE escape chars and Windows-style paths break JSON string encoding
+         when the model copies them into the 'reason' field.  Replacing every
+         backslash (including \\) is safe because these strings are only read by
+         the model — they are never executed as SQL or parsed as JSON themselves.
     """
     if not text:
         return text
     text = _re.sub(r'`([^`]*)`', r"'\1'", text)
     text = text.replace('\x00', ' ')
     text = _re.sub(r'[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]', ' ', text)
+    text = text.replace('"', "'")
+    text = text.replace('\\', ' ')
     return text

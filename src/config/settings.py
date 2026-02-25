@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
@@ -55,6 +55,10 @@ class Settings(BaseSettings):
 
     # Logging
     log_level: str = "INFO"
+
+    # Fallback event tracking
+    fallback_tracking_enabled: bool = True
+    fallback_log_file: Optional[str] = None  # e.g. "logs/fallbacks.jsonl"
 
     @model_validator(mode="after")
     def _apply_model_defaults(self) -> "Settings":

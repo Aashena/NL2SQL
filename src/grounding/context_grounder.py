@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Optional
 
 from src.llm import get_client, CacheableText, ToolParam, LLMError, sanitize_prompt_text
 from src.config.settings import settings
+from src.monitoring.fallback_tracker import FallbackEvent, get_tracker
 
 if TYPE_CHECKING:
     from src.indexing.lsh_index import CellMatch, LSHIndex
@@ -222,6 +223,16 @@ async def ground_context(
             len(fallback_literals),
             exc,
         )
+        get_tracker().record(FallbackEvent(
+            component="context_grounder",
+            trigger="llm_error",
+            action="keyword_extraction_fallback",
+            details={
+                "question_prefix": question[:60],
+                "fallback_keyword_count": len(fallback_literals),
+                "error": str(exc),
+            },
+        ))
         literals = fallback_literals
         schema_references = []
 

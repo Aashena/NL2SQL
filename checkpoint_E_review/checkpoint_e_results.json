@@ -1,7 +1,7 @@
 {
   "run_metadata": {
-    "timestamp": "2026-02-24 13:33:05",
-    "elapsed_seconds": 2967.8,
+    "timestamp": "2026-02-25 16:26:21",
+    "elapsed_seconds": 1419.2,
     "llm_provider": "gemini",
     "model_fast": "gemini-2.5-flash",
     "model_powerful": "gemini-2.5-flash",
@@ -12,8 +12,8 @@
   },
   "aggregate": {
     "total": 33,
-    "correct": 17,
-    "accuracy": 0.5152,
+    "correct": 18,
+    "accuracy": 0.5455,
     "by_difficulty": {
       "simple": {
         "correct": 7,
@@ -21,21 +21,21 @@
         "accuracy": 0.6364
       },
       "moderate": {
-        "correct": 5,
+        "correct": 7,
         "total": 11,
-        "accuracy": 0.4545
+        "accuracy": 0.6364
       },
       "challenging": {
-        "correct": 5,
+        "correct": 4,
         "total": 11,
-        "accuracy": 0.4545
+        "accuracy": 0.3636
       }
     },
     "by_database": {
       "california_schools": {
-        "correct": 1,
+        "correct": 2,
         "total": 3,
-        "accuracy": 0.3333
+        "accuracy": 0.6667
       },
       "card_games": {
         "correct": 1,
@@ -63,9 +63,9 @@
         "accuracy": 0.0
       },
       "formula_1": {
-        "correct": 1,
+        "correct": 2,
         "total": 3,
-        "accuracy": 0.3333
+        "accuracy": 0.6667
       },
       "student_club": {
         "correct": 2,
@@ -83,9 +83,9 @@
         "accuracy": 0.3333
       },
       "toxicology": {
-        "correct": 3,
+        "correct": 2,
         "total": 3,
-        "accuracy": 1.0
+        "accuracy": 0.6667
       }
     },
     "error_stage_counts": {},
@@ -95,29 +95,29 @@
       "oracle_post_fix": 21,
       "oracle_pre_fix_rate": 0.6364,
       "oracle_post_fix_rate": 0.6364,
-      "selector_precision_when_oracle": 0.8095,
+      "selector_precision_when_oracle": 0.8571,
       "n_oracle_achievable": 21,
-      "selector_matched": 17
+      "selector_matched": 18
     },
     "fixer": {
       "total_candidates": 363,
-      "original_success": 340,
-      "post_fix_success": 347,
-      "needed_fix": 23,
-      "fixed_ok": 7,
-      "still_failing": 16,
-      "fix_success_rate": 0.3043,
-      "pre_oracle_candidates": 172,
-      "post_oracle_candidates": 177
+      "original_success": 331,
+      "post_fix_success": 348,
+      "needed_fix": 32,
+      "fixed_ok": 17,
+      "still_failing": 15,
+      "fix_success_rate": 0.5312,
+      "pre_oracle_candidates": 176,
+      "post_oracle_candidates": 183
     },
     "schema_linker": {
       "n_evaluated": 33,
       "avg_table_recall_s1": 0.9495,
-      "avg_col_recall_s1": 0.9333,
-      "avg_table_recall_s2": 0.9495,
-      "avg_col_recall_s2": 0.9566,
-      "s1_complete_count": 25,
-      "s2_complete_count": 28
+      "avg_col_recall_s1": 0.9414,
+      "avg_table_recall_s2": 0.9596,
+      "avg_col_recall_s2": 0.9652,
+      "s1_complete_count": 26,
+      "s2_complete_count": 29
     }
   },
   "questions": [
@@ -137,7 +137,7 @@
         },
         "schema_linking": {
           "s1_fields": 4,
-          "s2_fields": 8,
+          "s2_fields": 7,
           "error": null
         },
         "generation": {
@@ -208,14 +208,14 @@
       "gold_sql": "SELECT T1.School, T1.Street FROM schools AS T1 INNER JOIN frpm AS T2 ON T1.CDSCode = T2.CDSCode WHERE T2.`Enrollment (K-12)` - T2.`Enrollment (Ages 5-17)` > 30",
       "stages": {
         "grounding": {
-          "keywords_extracted": 4,
+          "keywords_extracted": 5,
           "cell_matches": 1,
           "few_shot_examples": 8,
           "error": null
         },
         "schema_linking": {
           "s1_fields": 8,
-          "s2_fields": 15,
+          "s2_fields": 12,
           "error": null
         },
         "generation": {
@@ -239,20 +239,20 @@
         },
         "selection": {
           "method": "tournament",
-          "winner_generator": "reasoning_A2",
+          "winner_generator": "reasoning_A4",
           "cluster_count": 2,
           "error": null
         }
       },
-      "final_sql": "SELECT f.\"School Name\", s.Street FROM frpm AS f JOIN schools AS s ON f.CDSCode = s.CDSCode WHERE ( f.\"Enrollment (K-12)\" - f.\"Enrollment (Ages 5-17)\" ) > 30",
-      "correct": false,
+      "final_sql": "SELECT s.School, s.Street FROM schools AS s JOIN frpm AS f ON s.CDSCode = f.CDSCode WHERE ( f.\"Enrollment (K-12)\" - f.\"Enrollment (Ages 5-17)\" ) > 30",
+      "correct": true,
       "error_stage": null,
       "oracle_pre_fix": true,
-      "oracle_pre_fix_count": 3,
+      "oracle_pre_fix_count": 7,
       "oracle_post_fix": true,
-      "oracle_post_fix_count": 3,
+      "oracle_post_fix_count": 7,
       "oracle_total_candidates": 11,
-      "selector_matched_oracle": false,
+      "selector_matched_oracle": true,
       "schema_recall": {
         "required_tables": [
           "frpm",
@@ -300,8 +300,8 @@
           "error": null
         },
         "schema_linking": {
-          "s1_fields": 8,
-          "s2_fields": 13,
+          "s1_fields": 7,
+          "s2_fields": 14,
           "error": null
         },
         "generation": {
@@ -317,20 +317,20 @@
         },
         "fixing": {
           "needed_fix": 2,
-          "fixed_successfully": 1,
-          "still_failing": 1,
+          "fixed_successfully": 0,
+          "still_failing": 2,
           "original_success_count": 9,
-          "post_fix_success_count": 10,
+          "post_fix_success_count": 9,
           "error": null
         },
         "selection": {
           "method": "tournament",
-          "winner_generator": "reasoning_A3",
-          "cluster_count": 4,
+          "winner_generator": "icl_C1",
+          "cluster_count": 6,
           "error": null
         }
       },
-      "final_sql": "SELECT T1.School, T1.DOCType FROM schools AS T1 INNER JOIN frpm AS T2 ON T1.CDSCode = T2.CDSCode WHERE T1.FundingType = 'Locally funded' AND (T2.\"Enrollment (K-12)\" - T2.\"Enrollment (Ages 5-17)\") > ( SELECT AVG(T3.\"Enrollment (K-12)\" - T3.\"Enrollment (Ages 5-17)\") FROM frpm AS T3 INNER JOIN schools AS T4 ON T3.CDSCode = T4.CDSCode WHERE T4.FundingType = 'Locally funded' )",
+      "final_sql": "SELECT T1.\"School Name\", T2.DOCType FROM frpm AS T1 INNER JOIN schools AS T2 ON T1.CDSCode = T2.CDSCode WHERE T2.FundingType = 'Locally funded' AND (T1.\"Enrollment (K-12)\" - T1.\"Enrollment (Ages 5-17)\") > ( SELECT AVG(T3.\"Enrollment (K-12)\" - T3.\"Enrollment (Ages 5-17)\") FROM frpm AS T3 INNER JOIN schools AS T4 ON T3.CDSCode = T4.CDSCode WHERE T4.FundingType = 'Locally funded' )",
       "correct": false,
       "error_stage": null,
       "oracle_pre_fix": false,
@@ -358,16 +358,15 @@
         "n_required_cols": 8,
         "table_recall_s1": 1.0,
         "table_recall_s2": 1.0,
-        "col_recall_s1": 0.75,
+        "col_recall_s1": 0.875,
         "col_recall_s2": 0.875,
         "tables_in_s1": 2,
         "tables_in_s2": 2,
-        "cols_in_s1": 6,
+        "cols_in_s1": 7,
         "cols_in_s2": 7,
         "missing_tables_in_s1": [],
         "missing_tables_in_s2": [],
         "missing_cols_in_s1": [
-          "t2.school",
           "t2.doc"
         ],
         "missing_cols_in_s2": [
@@ -388,7 +387,7 @@
       "stages": {
         "grounding": {
           "keywords_extracted": 2,
-          "cell_matches": 3,
+          "cell_matches": 2,
           "few_shot_examples": 8,
           "error": null
         },
@@ -409,17 +408,17 @@
           "error": null
         },
         "fixing": {
-          "needed_fix": 0,
+          "needed_fix": 1,
           "fixed_successfully": 0,
-          "still_failing": 0,
-          "original_success_count": 11,
-          "post_fix_success_count": 11,
+          "still_failing": 1,
+          "original_success_count": 10,
+          "post_fix_success_count": 10,
           "error": null
         },
         "selection": {
-          "method": "fast_path",
+          "method": "tournament",
           "winner_generator": "reasoning_A1",
-          "cluster_count": 1,
+          "cluster_count": 2,
           "error": null
         }
       },
@@ -488,27 +487,27 @@
           "error": null
         },
         "fixing": {
-          "needed_fix": 5,
-          "fixed_successfully": 2,
-          "still_failing": 3,
-          "original_success_count": 6,
-          "post_fix_success_count": 8,
+          "needed_fix": 4,
+          "fixed_successfully": 3,
+          "still_failing": 1,
+          "original_success_count": 7,
+          "post_fix_success_count": 10,
           "error": null
         },
         "selection": {
           "method": "fast_path",
-          "winner_generator": "reasoning_A1",
+          "winner_generator": "standard_B1_s1",
           "cluster_count": 1,
           "error": null
         }
       },
-      "final_sql": "SELECT T1.language FROM set_translations AS T1 INNER JOIN sets AS T2 ON T1.setCode = T2.code WHERE T2.mcmName = 'Archenemy' AND T2.code = 'ARC'",
+      "final_sql": "SELECT T2.language FROM sets AS T1 INNER JOIN set_translations AS T2 ON T1.code = T2.setCode WHERE T1.mcmName = 'Archenemy' AND T1.code = 'ARC'",
       "correct": true,
       "error_stage": null,
       "oracle_pre_fix": true,
-      "oracle_pre_fix_count": 6,
+      "oracle_pre_fix_count": 7,
       "oracle_post_fix": true,
-      "oracle_post_fix_count": 8,
+      "oracle_post_fix_count": 10,
       "oracle_total_candidates": 11,
       "selector_matched_oracle": true,
       "schema_recall": {
@@ -551,13 +550,13 @@
       "stages": {
         "grounding": {
           "keywords_extracted": 4,
-          "cell_matches": 10,
+          "cell_matches": 14,
           "few_shot_examples": 8,
           "error": null
         },
         "schema_linking": {
-          "s1_fields": 7,
-          "s2_fields": 17,
+          "s1_fields": 8,
+          "s2_fields": 16,
           "error": null
         },
         "generation": {
@@ -572,17 +571,17 @@
           "error": null
         },
         "fixing": {
-          "needed_fix": 7,
-          "fixed_successfully": 0,
-          "still_failing": 7,
-          "original_success_count": 4,
-          "post_fix_success_count": 4,
+          "needed_fix": 8,
+          "fixed_successfully": 2,
+          "still_failing": 6,
+          "original_success_count": 3,
+          "post_fix_success_count": 5,
           "error": null
         },
         "selection": {
           "method": "tournament",
           "winner_generator": "icl_C1",
-          "cluster_count": 3,
+          "cluster_count": 2,
           "error": null
         }
       },
@@ -613,19 +612,17 @@
         "n_required_cols": 7,
         "table_recall_s1": 1.0,
         "table_recall_s2": 1.0,
-        "col_recall_s1": 0.857,
+        "col_recall_s1": 1.0,
         "col_recall_s2": 1.0,
         "tables_in_s1": 2,
         "tables_in_s2": 2,
-        "cols_in_s1": 6,
+        "cols_in_s1": 7,
         "cols_in_s2": 7,
         "missing_tables_in_s1": [],
         "missing_tables_in_s2": [],
-        "missing_cols_in_s1": [
-          "t1.name"
-        ],
+        "missing_cols_in_s1": [],
         "missing_cols_in_s2": [],
-        "s1_complete": false,
+        "s1_complete": true,
         "s2_complete": true
       },
       "gold_exec_success": true
@@ -640,13 +637,13 @@
       "stages": {
         "grounding": {
           "keywords_extracted": 3,
-          "cell_matches": 3,
+          "cell_matches": 2,
           "few_shot_examples": 8,
           "error": null
         },
         "schema_linking": {
           "s1_fields": 9,
-          "s2_fields": 14,
+          "s2_fields": 17,
           "error": null
         },
         "generation": {
@@ -670,12 +667,12 @@
         },
         "selection": {
           "method": "fast_path",
-          "winner_generator": "complex_B2_s1",
+          "winner_generator": "reasoning_A4",
           "cluster_count": 1,
           "error": null
         }
       },
-      "final_sql": "SELECT p.Score, pl.LinkTypeId FROM posts AS p JOIN postLinks AS pl ON p.Id = pl.PostId WHERE p.Id = 395",
+      "final_sql": "SELECT P.Score, PL.LinkTypeId FROM posts AS P LEFT JOIN postLinks AS PL ON P.Id = PL.PostId WHERE P.Id = 395",
       "correct": true,
       "error_stage": null,
       "oracle_pre_fix": true,
@@ -730,7 +727,7 @@
         },
         "schema_linking": {
           "s1_fields": 7,
-          "s2_fields": 8,
+          "s2_fields": 9,
           "error": null
         },
         "generation": {
@@ -745,21 +742,21 @@
           "error": null
         },
         "fixing": {
-          "needed_fix": 0,
-          "fixed_successfully": 0,
+          "needed_fix": 1,
+          "fixed_successfully": 1,
           "still_failing": 0,
-          "original_success_count": 11,
+          "original_success_count": 10,
           "post_fix_success_count": 11,
           "error": null
         },
         "selection": {
           "method": "fast_path",
-          "winner_generator": "reasoning_A2",
+          "winner_generator": "icl_C2",
           "cluster_count": 1,
           "error": null
         }
       },
-      "final_sql": "SELECT CAST( ( SELECT COUNT(Id) FROM posts WHERE OwnerUserId = 24 ) AS REAL ) / ( SELECT COUNT(Id) FROM votes WHERE UserId = 24 )",
+      "final_sql": "SELECT CAST( ( SELECT COUNT(Id) FROM posts WHERE OwnerUserId = 24 ) AS REAL) / ( SELECT COUNT(Id) FROM votes WHERE UserId = 24 )",
       "correct": false,
       "error_stage": null,
       "oracle_pre_fix": false,
@@ -814,7 +811,7 @@
         },
         "schema_linking": {
           "s1_fields": 11,
-          "s2_fields": 18,
+          "s2_fields": 19,
           "error": null
         },
         "generation": {
@@ -896,7 +893,7 @@
       "stages": {
         "grounding": {
           "keywords_extracted": 3,
-          "cell_matches": 3,
+          "cell_matches": 2,
           "few_shot_examples": 8,
           "error": null
         },
@@ -969,12 +966,12 @@
           "gasstations"
         ],
         "missing_cols_in_s1": [
-          "t2.gasstationid",
-          "t1.gasstationid"
+          "t1.gasstationid",
+          "t2.gasstationid"
         ],
         "missing_cols_in_s2": [
-          "t2.gasstationid",
-          "t1.gasstationid"
+          "t1.gasstationid",
+          "t2.gasstationid"
         ],
         "s1_complete": false,
         "s2_complete": false
@@ -990,7 +987,7 @@
       "gold_sql": "SELECT T1.CustomerID FROM customers AS T1 INNER JOIN yearmonth AS T2 ON T1.CustomerID = T2.CustomerID WHERE T1.Currency = 'CZK' AND T2.Date BETWEEN 201101 AND 201112 GROUP BY T1.CustomerID ORDER BY SUM(T2.Consumption) DESC LIMIT 1",
       "stages": {
         "grounding": {
-          "keywords_extracted": 4,
+          "keywords_extracted": 3,
           "cell_matches": 2,
           "few_shot_examples": 8,
           "error": null
@@ -1012,27 +1009,27 @@
           "error": null
         },
         "fixing": {
-          "needed_fix": 1,
-          "fixed_successfully": 1,
+          "needed_fix": 0,
+          "fixed_successfully": 0,
           "still_failing": 0,
-          "original_success_count": 10,
+          "original_success_count": 11,
           "post_fix_success_count": 11,
           "error": null
         },
         "selection": {
-          "method": "tournament",
-          "winner_generator": "icl_C1",
-          "cluster_count": 2,
+          "method": "fast_path",
+          "winner_generator": "reasoning_A1",
+          "cluster_count": 1,
           "error": null
         }
       },
-      "final_sql": "SELECT T1.CustomerID FROM customers AS T1 INNER JOIN yearmonth AS T2 ON T1.CustomerID = T2.CustomerID WHERE T1.Currency = 'CZK' AND SUBSTR(T2.Date, 1, 4) = '2011' GROUP BY T1.CustomerID ORDER BY SUM(T2.Consumption) DESC LIMIT 1",
+      "final_sql": "SELECT T1.CustomerID FROM customers AS T1 INNER JOIN yearmonth AS T2 ON T1.CustomerID = T2.CustomerID WHERE T1.Currency = 'CZK' AND T2.Date BETWEEN '201101' AND '201112' GROUP BY T1.CustomerID ORDER BY SUM(T2.Consumption) DESC LIMIT 1",
       "correct": true,
       "error_stage": null,
       "oracle_pre_fix": true,
-      "oracle_pre_fix_count": 7,
+      "oracle_pre_fix_count": 11,
       "oracle_post_fix": true,
-      "oracle_post_fix_count": 8,
+      "oracle_post_fix_count": 11,
       "oracle_total_candidates": 11,
       "selector_matched_oracle": true,
       "schema_recall": {
@@ -1097,25 +1094,25 @@
           "error": null
         },
         "fixing": {
-          "needed_fix": 4,
-          "fixed_successfully": 0,
+          "needed_fix": 6,
+          "fixed_successfully": 2,
           "still_failing": 4,
-          "original_success_count": 7,
+          "original_success_count": 5,
           "post_fix_success_count": 7,
           "error": null
         },
         "selection": {
           "method": "fast_path",
-          "winner_generator": "standard_B1_s1",
+          "winner_generator": "icl_C3",
           "cluster_count": 1,
           "error": null
         }
       },
-      "final_sql": "SELECT (SUM(CASE WHEN SUBSTR(T2.Date, 1, 4) = '2012' THEN T2.Consumption ELSE 0 END) - SUM(CASE WHEN SUBSTR(T2.Date, 1, 4) = '2013' THEN T2.Consumption ELSE 0 END)) / SUM(CASE WHEN SUBSTR(T2.Date, 1, 4) = '2012' THEN T2.Consumption ELSE 0 END) FROM transactions_1k AS T1 INNER JOIN yearmonth AS T2 ON T1.CustomerID = T2.CustomerID WHERE T1.Price = 634.8 AND T1.Date = '2012-08-25'",
+      "final_sql": "SELECT (SUM(CASE WHEN SUBSTR(T2.Date, 1, 4) = '2012' THEN T2.Consumption ELSE 0 END) - SUM(CASE WHEN SUBSTR(T2.Date, 1, 4) = '2013' THEN T2.Consumption ELSE 0 END)) / SUM(CASE WHEN SUBSTR(T2.Date, 1, 4) = '2012' THEN T2.Consumption ELSE 0 END) FROM transactions_1k AS T1 INNER JOIN yearmonth AS T2 ON T1.CustomerID = T2.CustomerID WHERE T1.Date = '2012-08-25' AND T1.Price = 634.8",
       "correct": true,
       "error_stage": null,
       "oracle_pre_fix": true,
-      "oracle_pre_fix_count": 7,
+      "oracle_pre_fix_count": 5,
       "oracle_post_fix": true,
       "oracle_post_fix_count": 7,
       "oracle_total_candidates": 11,
@@ -1150,12 +1147,12 @@
           "gasstations"
         ],
         "missing_cols_in_s1": [
-          "t2.gasstationid",
-          "t1.gasstationid"
+          "t1.gasstationid",
+          "t2.gasstationid"
         ],
         "missing_cols_in_s2": [
-          "t2.gasstationid",
-          "t1.gasstationid"
+          "t1.gasstationid",
+          "t2.gasstationid"
         ],
         "s1_complete": false,
         "s2_complete": false
@@ -1178,7 +1175,7 @@
         },
         "schema_linking": {
           "s1_fields": 8,
-          "s2_fields": 18,
+          "s2_fields": 8,
           "error": null
         },
         "generation": {
@@ -1193,21 +1190,21 @@
           "error": null
         },
         "fixing": {
-          "needed_fix": 0,
-          "fixed_successfully": 0,
+          "needed_fix": 2,
+          "fixed_successfully": 2,
           "still_failing": 0,
-          "original_success_count": 11,
+          "original_success_count": 9,
           "post_fix_success_count": 11,
           "error": null
         },
         "selection": {
           "method": "fast_path",
-          "winner_generator": "standard_B1_s2",
+          "winner_generator": "reasoning_A1",
           "cluster_count": 1,
           "error": null
         }
       },
-      "final_sql": "SELECT P.player_name FROM Player AS P JOIN Player_Attributes AS PA ON P.player_api_id = PA.player_api_id ORDER BY PA.penalties DESC LIMIT 10",
+      "final_sql": "SELECT T1.player_name FROM Player AS T1 INNER JOIN Player_Attributes AS T2 ON T1.player_api_id = T2.player_api_id ORDER BY T2.penalties DESC LIMIT 10",
       "correct": false,
       "error_stage": null,
       "oracle_pre_fix": false,
@@ -1286,12 +1283,12 @@
         },
         "selection": {
           "method": "fast_path",
-          "winner_generator": "reasoning_A4",
+          "winner_generator": "reasoning_A1",
           "cluster_count": 1,
           "error": null
         }
       },
-      "final_sql": "SELECT L.name FROM Match AS M JOIN League AS L ON M.league_id = L.id WHERE M.season = '2015/2016' GROUP BY L.name ORDER BY SUM(M.home_team_goal + M.away_team_goal) DESC LIMIT 1",
+      "final_sql": "SELECT T1.name FROM League AS T1 INNER JOIN Match AS T2 ON T1.id = T2.league_id WHERE T2.season = '2015/2016' GROUP BY T1.name ORDER BY SUM(T2.home_team_goal + T2.away_team_goal) DESC LIMIT 1",
       "correct": true,
       "error_stage": null,
       "oracle_pre_fix": true,
@@ -1372,18 +1369,18 @@
         },
         "selection": {
           "method": "tournament",
-          "winner_generator": "standard_B1_s2",
-          "cluster_count": 3,
+          "winner_generator": "reasoning_A4",
+          "cluster_count": 5,
           "error": null
         }
       },
-      "final_sql": "SELECT DISTINCT CAST((julianday('now') - julianday(T1.birthday)) / 365.25 AS INTEGER) AS player_age FROM Player AS T1 INNER JOIN Player_Attributes AS T2 ON T1.player_api_id = T2.player_api_id WHERE T2.sprint_speed >= 97 AND STRFTIME('%Y', T2.date) >= '2013' AND STRFTIME('%Y', T2.date) <= '2015'",
+      "final_sql": "SELECT CAST((JULIANDAY('now') - JULIANDAY(T2.birthday)) / 365.25 AS INTEGER) AS player_present_age FROM Player_Attributes AS T1 INNER JOIN Player AS T2 ON T1.player_api_id = T2.player_api_id WHERE T1.sprint_speed >= 97 AND STRFTIME('%Y', T1.date) BETWEEN '2013' AND '2015'",
       "correct": false,
       "error_stage": null,
-      "oracle_pre_fix": false,
-      "oracle_pre_fix_count": 0,
-      "oracle_post_fix": false,
-      "oracle_post_fix_count": 0,
+      "oracle_pre_fix": true,
+      "oracle_pre_fix_count": 1,
+      "oracle_post_fix": true,
+      "oracle_post_fix_count": 1,
       "oracle_total_candidates": 11,
       "selector_matched_oracle": false,
       "schema_recall": {
@@ -1431,7 +1428,7 @@
           "error": null
         },
         "schema_linking": {
-          "s1_fields": 5,
+          "s1_fields": 10,
           "s2_fields": 10,
           "error": null
         },
@@ -1447,27 +1444,27 @@
           "error": null
         },
         "fixing": {
-          "needed_fix": 0,
-          "fixed_successfully": 0,
+          "needed_fix": 1,
+          "fixed_successfully": 1,
           "still_failing": 0,
-          "original_success_count": 11,
+          "original_success_count": 10,
           "post_fix_success_count": 11,
           "error": null
         },
         "selection": {
-          "method": "tournament",
-          "winner_generator": "reasoning_A3",
-          "cluster_count": 2,
+          "method": "fast_path",
+          "winner_generator": "standard_B1_s1",
+          "cluster_count": 1,
           "error": null
         }
       },
-      "final_sql": "SELECT COUNT(DISTINCT T3.client_id) FROM district AS T1 INNER JOIN account AS T2 ON T1.district_id = T2.district_id INNER JOIN disp AS T4 ON T2.account_id = T4.account_id INNER JOIN client AS T3 ON T4.client_id = T3.client_id WHERE T1.A2 = 'Jesenik' AND T3.gender = 'F'",
+      "final_sql": "SELECT COUNT(T1.client_id) FROM client AS T1 INNER JOIN disp AS T2 ON T1.client_id = T2.client_id INNER JOIN account AS T3 ON T2.account_id = T3.account_id INNER JOIN district AS T4 ON T3.district_id = T4.district_id WHERE T4.A2 = 'Jesenik' AND T1.gender = 'F'",
       "correct": false,
       "error_stage": null,
-      "oracle_pre_fix": true,
-      "oracle_pre_fix_count": 5,
-      "oracle_post_fix": true,
-      "oracle_post_fix_count": 5,
+      "oracle_pre_fix": false,
+      "oracle_pre_fix_count": 0,
+      "oracle_post_fix": false,
+      "oracle_post_fix_count": 0,
       "oracle_total_candidates": 11,
       "selector_matched_oracle": false,
       "schema_recall": {
@@ -1546,7 +1543,7 @@
           "error": null
         }
       },
-      "final_sql": "SELECT COUNT(DISTINCT T1.account_id) FROM account AS T1 INNER JOIN trans AS T2 ON T1.account_id = T2.account_id WHERE T2.operation = 'VYBER KARTOU' AND T1.frequency = 'POPLATEK MESICNE' AND T2.balance < 0",
+      "final_sql": "SELECT COUNT(DISTINCT T1.account_id) FROM account AS T1 INNER JOIN trans AS T2 ON T1.account_id = T2.account_id WHERE T1.frequency = 'POPLATEK MESICNE' AND T2.operation = 'VYBER KARTOU' AND T2.balance < 0",
       "correct": false,
       "error_stage": null,
       "oracle_pre_fix": false,
@@ -1602,7 +1599,7 @@
         },
         "schema_linking": {
           "s1_fields": 8,
-          "s2_fields": 11,
+          "s2_fields": 13,
           "error": null
         },
         "generation": {
@@ -1626,12 +1623,12 @@
         },
         "selection": {
           "method": "fast_path",
-          "winner_generator": "reasoning_A1",
+          "winner_generator": "icl_C1",
           "cluster_count": 1,
           "error": null
         }
       },
-      "final_sql": "SELECT DISTINCT T1.type FROM disp AS T1 INNER JOIN account AS T2 ON T1.account_id = T2.account_id INNER JOIN district AS T3 ON T2.district_id = T3.district_id WHERE T1.type <> 'OWNER' AND T3.A11 > 8000 AND T3.A11 <= 9000",
+      "final_sql": "SELECT DISTINCT T1.type FROM disp AS T1 JOIN account AS T2 ON T1.account_id = T2.account_id JOIN district AS T3 ON T2.district_id = T3.district_id WHERE T1.type <> 'OWNER' AND T3.A11 > 8000 AND T3.A11 <= 9000",
       "correct": false,
       "error_stage": null,
       "oracle_pre_fix": false,
@@ -1682,7 +1679,7 @@
       "gold_sql": "SELECT COUNT(DISTINCT T2.constructorId) FROM results AS T1 INNER JOIN constructors AS T2 on T1.constructorId = T2.constructorId WHERE T1.laps > 50 AND T2.nationality = 'French'",
       "stages": {
         "grounding": {
-          "keywords_extracted": 3,
+          "keywords_extracted": 2,
           "cell_matches": 3,
           "few_shot_examples": 8,
           "error": null
@@ -1713,7 +1710,7 @@
         },
         "selection": {
           "method": "tournament",
-          "winner_generator": "reasoning_A4",
+          "winner_generator": "reasoning_A3",
           "cluster_count": 2,
           "error": null
         }
@@ -1722,9 +1719,9 @@
       "correct": false,
       "error_stage": null,
       "oracle_pre_fix": true,
-      "oracle_pre_fix_count": 3,
+      "oracle_pre_fix_count": 4,
       "oracle_post_fix": true,
-      "oracle_post_fix_count": 3,
+      "oracle_post_fix_count": 4,
       "oracle_total_candidates": 11,
       "selector_matched_oracle": false,
       "schema_recall": {
@@ -1790,29 +1787,29 @@
           "error": null
         },
         "fixing": {
-          "needed_fix": 1,
-          "fixed_successfully": 1,
+          "needed_fix": 2,
+          "fixed_successfully": 2,
           "still_failing": 0,
-          "original_success_count": 10,
+          "original_success_count": 9,
           "post_fix_success_count": 11,
           "error": null
         },
         "selection": {
           "method": "tournament",
-          "winner_generator": "standard_B1_s1",
+          "winner_generator": "reasoning_A1",
           "cluster_count": 4,
           "error": null
         }
       },
-      "final_sql": "SELECT COUNT(T1.raceId) FROM races AS T1 INNER JOIN circuits AS T2 ON T1.circuitId = T2.circuitId WHERE T1.year = 2010 AND T2.country NOT IN ('Asia', 'Europe')",
-      "correct": false,
+      "final_sql": "SELECT COUNT(T1.raceId) FROM races AS T1 INNER JOIN circuits AS T2 ON T1.circuitId = T2.circuitId WHERE T1.year = 2010 AND T2.country IN ('Australia', 'Canada', 'Brazil')",
+      "correct": true,
       "error_stage": null,
       "oracle_pre_fix": true,
-      "oracle_pre_fix_count": 2,
+      "oracle_pre_fix_count": 3,
       "oracle_post_fix": true,
-      "oracle_post_fix_count": 2,
+      "oracle_post_fix_count": 3,
       "oracle_total_candidates": 11,
-      "selector_matched_oracle": false,
+      "selector_matched_oracle": true,
       "schema_recall": {
         "required_tables": [
           "circuits",
@@ -1875,27 +1872,27 @@
           "error": null
         },
         "fixing": {
-          "needed_fix": 1,
-          "fixed_successfully": 1,
+          "needed_fix": 0,
+          "fixed_successfully": 0,
           "still_failing": 0,
-          "original_success_count": 10,
+          "original_success_count": 11,
           "post_fix_success_count": 11,
           "error": null
         },
         "selection": {
-          "method": "fast_path",
-          "winner_generator": "icl_C2",
-          "cluster_count": 1,
+          "method": "tournament",
+          "winner_generator": "standard_B1_s1",
+          "cluster_count": 2,
           "error": null
         }
       },
-      "final_sql": "SELECT SUM(T2.points), T3.name, T3.nationality FROM races AS T1 INNER JOIN constructorResults AS T2 ON T1.raceId = T2.raceId INNER JOIN constructors AS T3 ON T2.constructorId = T3.constructorId WHERE T1.name = 'Monaco Grand Prix' AND T1.year BETWEEN 1980 AND 2010 GROUP BY T3.name, T3.nationality ORDER BY SUM(T2.points) DESC LIMIT 1",
+      "final_sql": "SELECT SUM(T1.points) AS total_score, T2.name, T2.nationality FROM constructorResults AS T1 INNER JOIN constructors AS T2 ON T1.constructorId = T2.constructorId INNER JOIN races AS T3 ON T1.raceId = T3.raceId WHERE T3.name = 'Monaco Grand Prix' AND T3.year BETWEEN 1980 AND 2010 GROUP BY T2.constructorId ORDER BY total_score DESC LIMIT 1",
       "correct": true,
       "error_stage": null,
       "oracle_pre_fix": true,
-      "oracle_pre_fix_count": 10,
+      "oracle_pre_fix_count": 9,
       "oracle_post_fix": true,
-      "oracle_post_fix_count": 11,
+      "oracle_post_fix_count": 9,
       "oracle_total_candidates": 11,
       "selector_matched_oracle": true,
       "schema_recall": {
@@ -1944,13 +1941,13 @@
       "stages": {
         "grounding": {
           "keywords_extracted": 1,
-          "cell_matches": 4,
+          "cell_matches": 3,
           "few_shot_examples": 8,
           "error": null
         },
         "schema_linking": {
           "s1_fields": 5,
-          "s2_fields": 6,
+          "s2_fields": 7,
           "error": null
         },
         "generation": {
@@ -1979,7 +1976,7 @@
           "error": null
         }
       },
-      "final_sql": "SELECT SUM(T1.amount) FROM budget AS T1 INNER JOIN event AS T2 ON T1.link_to_event = T2.event_id WHERE T2.event_name = 'September Speaker'",
+      "final_sql": "SELECT SUM(T2.amount) FROM event AS T1 INNER JOIN budget AS T2 ON T1.event_id = T2.link_to_event WHERE T1.event_name = 'September Speaker'",
       "correct": true,
       "error_stage": null,
       "oracle_pre_fix": true,
@@ -2034,7 +2031,7 @@
         },
         "schema_linking": {
           "s1_fields": 9,
-          "s2_fields": 9,
+          "s2_fields": 15,
           "error": null
         },
         "generation": {
@@ -2049,21 +2046,21 @@
           "error": null
         },
         "fixing": {
-          "needed_fix": 0,
-          "fixed_successfully": 0,
+          "needed_fix": 1,
+          "fixed_successfully": 1,
           "still_failing": 0,
-          "original_success_count": 11,
+          "original_success_count": 10,
           "post_fix_success_count": 11,
           "error": null
         },
         "selection": {
           "method": "tournament",
-          "winner_generator": "icl_C1",
-          "cluster_count": 4,
+          "winner_generator": "standard_B1_s1",
+          "cluster_count": 3,
           "error": null
         }
       },
-      "final_sql": "SELECT T1.first_name, T1.last_name FROM member AS T1 INNER JOIN expense AS T2 ON T1.member_id = T2.link_to_member GROUP BY T1.member_id ORDER BY SUM(T2.cost) DESC LIMIT 5",
+      "final_sql": "SELECT T1.first_name, T1.last_name FROM member AS T1 INNER JOIN expense AS T2 ON T1.member_id = T2.link_to_member GROUP BY T1.member_id, T1.first_name, T1.last_name ORDER BY SUM(T2.cost) DESC LIMIT 5",
       "correct": false,
       "error_stage": null,
       "oracle_pre_fix": false,
@@ -2090,29 +2087,24 @@
         "n_required_tables": 3,
         "n_required_cols": 7,
         "table_recall_s1": 0.667,
-        "table_recall_s2": 0.667,
+        "table_recall_s2": 1.0,
         "col_recall_s1": 0.714,
-        "col_recall_s2": 0.714,
+        "col_recall_s2": 1.0,
         "tables_in_s1": 2,
-        "tables_in_s2": 2,
+        "tables_in_s2": 3,
         "cols_in_s1": 5,
-        "cols_in_s2": 5,
+        "cols_in_s2": 7,
         "missing_tables_in_s1": [
           "budget"
         ],
-        "missing_tables_in_s2": [
-          "budget"
-        ],
+        "missing_tables_in_s2": [],
         "missing_cols_in_s1": [
-          "t2.budget_id",
-          "t2.spent"
+          "t2.spent",
+          "t2.budget_id"
         ],
-        "missing_cols_in_s2": [
-          "t2.budget_id",
-          "t2.spent"
-        ],
+        "missing_cols_in_s2": [],
         "s1_complete": false,
-        "s2_complete": false
+        "s2_complete": true
       },
       "gold_exec_success": true
     },
@@ -2199,12 +2191,12 @@
         "cols_in_s1": 7,
         "cols_in_s2": 7,
         "missing_tables_in_s1": [
-          "event",
-          "attendance"
+          "attendance",
+          "event"
         ],
         "missing_tables_in_s2": [
-          "event",
-          "attendance"
+          "attendance",
+          "event"
         ],
         "missing_cols_in_s1": [
           "t2.link_to_event",
@@ -2250,10 +2242,10 @@
           "error": null
         },
         "fixing": {
-          "needed_fix": 0,
-          "fixed_successfully": 0,
+          "needed_fix": 1,
+          "fixed_successfully": 1,
           "still_failing": 0,
-          "original_success_count": 11,
+          "original_success_count": 10,
           "post_fix_success_count": 11,
           "error": null
         },
@@ -2268,7 +2260,7 @@
       "correct": true,
       "error_stage": null,
       "oracle_pre_fix": true,
-      "oracle_pre_fix_count": 11,
+      "oracle_pre_fix_count": 10,
       "oracle_post_fix": true,
       "oracle_post_fix_count": 11,
       "oracle_total_candidates": 11,
@@ -2398,7 +2390,7 @@
         },
         "schema_linking": {
           "s1_fields": 11,
-          "s2_fields": 13,
+          "s2_fields": 12,
           "error": null
         },
         "generation": {
@@ -2422,12 +2414,12 @@
         },
         "selection": {
           "method": "fast_path",
-          "winner_generator": "complex_B2_s2",
+          "winner_generator": "reasoning_A1",
           "cluster_count": 1,
           "error": null
         }
       },
-      "final_sql": "SELECT s.superhero_name, p.publisher_name FROM superhero AS s JOIN publisher AS p ON s.publisher_id = p.id WHERE s.hair_colour_id = s.skin_colour_id AND s.hair_colour_id = s.eye_colour_id",
+      "final_sql": "SELECT s.superhero_name, p.publisher_name FROM superhero AS s JOIN publisher AS p ON s.publisher_id = p.id WHERE s.eye_colour_id = s.hair_colour_id AND s.hair_colour_id = s.skin_colour_id",
       "correct": true,
       "error_stage": null,
       "oracle_pre_fix": true,
@@ -2510,7 +2502,7 @@
         "selection": {
           "method": "tournament",
           "winner_generator": "standard_B1_s1",
-          "cluster_count": 4,
+          "cluster_count": 3,
           "error": null
         }
       },
@@ -2518,9 +2510,9 @@
       "correct": true,
       "error_stage": null,
       "oracle_pre_fix": true,
-      "oracle_pre_fix_count": 5,
+      "oracle_pre_fix_count": 7,
       "oracle_post_fix": true,
-      "oracle_post_fix_count": 5,
+      "oracle_post_fix_count": 7,
       "oracle_total_candidates": 11,
       "selector_matched_oracle": true,
       "schema_recall": {
@@ -2569,7 +2561,7 @@
         },
         "schema_linking": {
           "s1_fields": 5,
-          "s2_fields": 6,
+          "s2_fields": 5,
           "error": null
         },
         "generation": {
@@ -2584,16 +2576,16 @@
           "error": null
         },
         "fixing": {
-          "needed_fix": 0,
-          "fixed_successfully": 0,
+          "needed_fix": 1,
+          "fixed_successfully": 1,
           "still_failing": 0,
-          "original_success_count": 11,
+          "original_success_count": 10,
           "post_fix_success_count": 11,
           "error": null
         },
         "selection": {
           "method": "fast_path",
-          "winner_generator": "reasoning_A2",
+          "winner_generator": "reasoning_A1",
           "cluster_count": 1,
           "error": null
         }
@@ -2681,7 +2673,7 @@
           "error": null
         }
       },
-      "final_sql": "SELECT COUNT(DISTINCT T1.ID) FROM Laboratory AS T1 INNER JOIN Examination AS T2 ON T1.ID = T2.ID WHERE T1.\"T-BIL\" >= 2.0 AND T2.\"ANA Pattern\" LIKE '%P%'",
+      "final_sql": "SELECT COUNT(DISTINCT T1.ID) FROM Examination AS T1 INNER JOIN Laboratory AS T2 ON T1.ID = T2.ID WHERE T2.\"T-BIL\" >= 2.0 AND T1.\"ANA Pattern\" LIKE '%P%'",
       "correct": false,
       "error_stage": null,
       "oracle_pre_fix": false,
@@ -2760,12 +2752,12 @@
         },
         "selection": {
           "method": "fast_path",
-          "winner_generator": "icl_C1",
+          "winner_generator": "reasoning_A1",
           "cluster_count": 1,
           "error": null
         }
       },
-      "final_sql": "SELECT bond_type FROM bond GROUP BY bond_type ORDER BY COUNT(bond_id) DESC LIMIT 1",
+      "final_sql": "SELECT bond_type FROM bond GROUP BY bond_type ORDER BY COUNT(bond_type) DESC LIMIT 1",
       "correct": true,
       "error_stage": null,
       "oracle_pre_fix": true,
@@ -2840,7 +2832,7 @@
         },
         "selection": {
           "method": "fast_path",
-          "winner_generator": "icl_C3",
+          "winner_generator": "icl_C1",
           "cluster_count": 1,
           "error": null
         }
@@ -2894,7 +2886,7 @@
       "stages": {
         "grounding": {
           "keywords_extracted": 2,
-          "cell_matches": 1,
+          "cell_matches": 2,
           "few_shot_examples": 8,
           "error": null
         },
@@ -2924,20 +2916,20 @@
         },
         "selection": {
           "method": "tournament",
-          "winner_generator": "complex_B2_s1",
+          "winner_generator": "reasoning_A2",
           "cluster_count": 2,
           "error": null
         }
       },
-      "final_sql": "SELECT DISTINCT m.molecule_id, a.element FROM molecule AS m JOIN atom AS a ON m.molecule_id = a.molecule_id WHERE m.label = '+'",
-      "correct": true,
+      "final_sql": "SELECT T1.molecule_id, T2.element FROM molecule AS T1 INNER JOIN atom AS T2 ON T1.molecule_id = T2.molecule_id WHERE T1.label = '+'",
+      "correct": false,
       "error_stage": null,
       "oracle_pre_fix": true,
-      "oracle_pre_fix_count": 6,
+      "oracle_pre_fix_count": 5,
       "oracle_post_fix": true,
-      "oracle_post_fix_count": 6,
+      "oracle_post_fix_count": 5,
       "oracle_total_candidates": 11,
-      "selector_matched_oracle": true,
+      "selector_matched_oracle": false,
       "schema_recall": {
         "required_tables": [
           "atom",

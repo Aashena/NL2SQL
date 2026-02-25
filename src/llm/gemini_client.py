@@ -26,6 +26,7 @@ from tenacity import (
 )
 
 from src.llm.base import CacheableText, LLMClient, LLMError, LLMMalformedToolError, LLMRateLimitError, LLMResponse, ThinkingConfig, ToolParam
+from src.monitoring.fallback_tracker import FallbackEvent, get_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +179,18 @@ class GeminiClient(LLMClient):
                     _current_max,
                     _retry_max,
                 )
+                get_tracker().record(FallbackEvent(
+                    component="gemini_client",
+                    trigger="max_tokens",
+                    action="token_escalation",
+                    details={
+                        "model": model,
+                        "escalation_attempt": _attempt + 1,
+                        "from_max_tokens": _current_max,
+                        "to_max_tokens": _retry_max,
+                    },
+                    severity="warning",
+                ))
                 _current_max = _retry_max
                 gen_config.max_output_tokens = _current_max
                 async with self._get_semaphore():
@@ -216,6 +229,13 @@ class GeminiClient(LLMClient):
         except Exception as exc:
             # Common failures: too few tokens (< 1024), model doesn't support caching
             logger.debug("Gemini context caching failed (proceeding without cache): %s", exc)
+            get_tracker().record(FallbackEvent(
+                component="gemini_client",
+                trigger="cache_creation_failure",
+                action="plain_system_instruction",
+                details={"model": model, "error": str(exc)},
+                severity="warning",
+            ))
             return None
 
     @retry(
@@ -288,6 +308,13 @@ def _parse_response(raw: Any) -> LLMResponse:
     # Detect MALFORMED_FUNCTION_CALL immediately — retrying with the same
     # prompt will not help; callers should apply prompt simplification instead.
     if "MALFORMED_FUNCTION_CALL" in finish_reason:
+        get_tracker().record(FallbackEvent(
+            component="gemini_client",
+            trigger="malformed_function_call",
+            action="raise_llm_malformed_tool_error",
+            details={"finish_reason": finish_reason},
+            severity="error",
+        ))
         raise LLMMalformedToolError(
             f"Gemini returned MALFORMED_FUNCTION_CALL (finish_reason={finish_reason})"
         )

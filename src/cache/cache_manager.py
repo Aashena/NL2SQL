@@ -20,6 +20,7 @@ from typing import Any, Optional
 
 from src.llm.base import LLMResponse
 from src.config.settings import settings
+from src.monitoring.fallback_tracker import FallbackEvent, get_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +104,12 @@ class CacheManager:
                 entry = json.load(f)
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning("Cache read error for %s: %s", path, exc)
+            get_tracker().record(FallbackEvent(
+                component="cache_manager",
+                trigger="io_error",
+                action="cache_miss",
+                details={"path": str(path), "error": str(exc)},
+            ))
             return None
 
         # Validate that this entry has the right full key (collision check)
@@ -162,6 +169,12 @@ class CacheManager:
             logger.debug("Cache write for key %s", key[:16])
         except OSError as exc:
             logger.warning("Cache write error for %s: %s", path, exc)
+            get_tracker().record(FallbackEvent(
+                component="cache_manager",
+                trigger="io_error",
+                action="skip_cache_write",
+                details={"path": str(path), "error": str(exc)},
+            ))
 
     def cached(self, model: str, ttl: Optional[int] = None):
         """

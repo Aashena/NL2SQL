@@ -25,6 +25,7 @@ from src.config.settings import settings
 from src.data.database import ExecutionResult, execute_sql
 from src.generation.base_generator import SQLCandidate, clean_sql
 from src.llm import CacheableText, LLMError, get_client
+from src.monitoring.fallback_tracker import FallbackEvent, get_tracker
 
 if TYPE_CHECKING:
     from src.schema_linking.schema_linker import LinkedSchemas
@@ -325,6 +326,16 @@ class QueryFixer:
                     candidate.generator_id,
                     exc,
                 )
+                get_tracker().record(FallbackEvent(
+                    component="query_fixer",
+                    trigger="llm_error",
+                    action="fix_loop_break",
+                    details={
+                        "candidate_id": candidate.generator_id,
+                        "iteration": iteration + 1,
+                        "error": str(exc),
+                    },
+                ))
                 break
 
             if not fixed_sql:
@@ -333,6 +344,15 @@ class QueryFixer:
                     iteration + 1,
                     candidate.generator_id,
                 )
+                get_tracker().record(FallbackEvent(
+                    component="query_fixer",
+                    trigger="empty_output",
+                    action="fix_loop_break",
+                    details={
+                        "candidate_id": candidate.generator_id,
+                        "iteration": iteration + 1,
+                    },
+                ))
                 break
 
             # Execute the fixed SQL

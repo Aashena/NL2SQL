@@ -93,15 +93,15 @@ def _make_schemas() -> LinkedSchemas:
 
 
 def _make_mock_client(winner: str = "A") -> AsyncMock:
-    """Return an AsyncMock LLM client whose generate() returns tool_use with winner."""
+    """Return an AsyncMock LLM client whose generate() returns free-text with FINAL: winner."""
     mock_client = AsyncMock()
     mock_client.generate = AsyncMock(
         return_value=LLMResponse(
-            tool_inputs=[{"winner": winner, "reason": "candidate A is better"}],
-            text=None,
+            tool_inputs=[],
+            text=f"After analysis, the better candidate is clear.\nFINAL: {winner}",
             thinking=None,
             input_tokens=100,
-            output_tokens=10,
+            output_tokens=20,
         )
     )
     return mock_client
@@ -255,11 +255,11 @@ async def test_tournament_winner_has_most_wins():
         call_count[0] += 1
         # Always return A wins
         return LLMResponse(
-            tool_inputs=[{"winner": "A", "reason": "A is better"}],
-            text=None,
+            tool_inputs=[],
+            text="Candidate A is clearly better here.\nFINAL: A",
             thinking=None,
             input_tokens=100,
-            output_tokens=10,
+            output_tokens=20,
         )
 
     mock_client = AsyncMock()
@@ -319,11 +319,11 @@ async def test_candidate_reorganization_order():
             if m:
                 a_candidates_in_pair.append(m.group(1))
         return LLMResponse(
-            tool_inputs=[{"winner": "A", "reason": "A wins"}],
-            text=None,
+            tool_inputs=[],
+            text="Candidate A wins this comparison.\nFINAL: A",
             thinking=None,
             input_tokens=100,
-            output_tokens=10,
+            output_tokens=20,
         )
 
     mock_client = AsyncMock()
@@ -385,11 +385,11 @@ async def test_generator_ranking_as_tiebreaker():
             if m:
                 a_generators.append(m.group(1))
         return LLMResponse(
-            tool_inputs=[{"winner": "A", "reason": "A wins"}],
-            text=None,
+            tool_inputs=[],
+            text="Candidate A wins this comparison.\nFINAL: A",
             thinking=None,
             input_tokens=100,
-            output_tokens=10,
+            output_tokens=20,
         )
 
     mock_client = AsyncMock()
@@ -444,12 +444,16 @@ async def test_haiku_used_for_pairwise():
             db_path="/fake/db.sqlite",
         )
 
-    # Verify all generate() calls used model_fast
+    # Verify all generate() calls used model_fast and free-text mode (tools=[])
     assert mock_client.generate.call_count >= 1
     for call_args in mock_client.generate.call_args_list:
         model_used = call_args.kwargs.get("model")
         assert model_used == settings.model_fast, (
             f"Expected model={settings.model_fast!r}, got {model_used!r}"
+        )
+        tools_used = call_args.kwargs.get("tools")
+        assert tools_used == [], (
+            f"Expected tools=[] (free-text mode), got {tools_used!r}"
         )
 
 
@@ -538,12 +542,12 @@ async def test_fallback_on_no_executable_candidates():
 
 
 # ---------------------------------------------------------------------------
-# Test 10: Structured winner output — tool-use enforced
+# Test 10: Free-text mode — no tool-use
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_structured_winner_output():
-    """Selection uses tool-use (tools parameter passed to LLM), not free-text parsing."""
+async def test_free_text_mode_no_tools():
+    """Pairwise comparison uses free-text mode (tools=[]), not tool-use."""
     candidates = [
         _make_candidate("SELECT id FROM t", "reasoning_A1", [(1,)], confidence=0.9),
         _make_candidate("SELECT 2", "standard_B1_s1", [(2,)], confidence=0.8),
@@ -563,16 +567,13 @@ async def test_structured_winner_output():
             db_path="/fake/db.sqlite",
         )
 
-    # Verify that generate() was called with tools parameter
     assert mock_client.generate.call_count >= 1
     for call_args in mock_client.generate.call_args_list:
         tools = call_args.kwargs.get("tools")
-        assert tools is not None, "tools parameter must be passed to generate()"
-        assert len(tools) > 0, "tools list must be non-empty"
-        # Verify tool_choice_name is set
+        assert tools == [], f"Expected tools=[] (free-text mode), got {tools!r}"
         tool_choice = call_args.kwargs.get("tool_choice_name")
-        assert tool_choice == "select_winner", (
-            f"Expected tool_choice_name='select_winner', got {tool_choice!r}"
+        assert tool_choice is None, (
+            f"Expected tool_choice_name=None in free-text mode, got {tool_choice!r}"
         )
 
 
@@ -650,11 +651,11 @@ async def test_empty_result_cluster_deprioritized():
             if m:
                 a_generators.append(m.group(1))
         return LLMResponse(
-            tool_inputs=[{"winner": "A", "reason": "A wins"}],
-            text=None,
+            tool_inputs=[],
+            text="The non-empty result is clearly better.\nFINAL: A",
             thinking=None,
             input_tokens=100,
-            output_tokens=10,
+            output_tokens=20,
         )
 
     mock_client = AsyncMock()
@@ -798,3 +799,115 @@ def test_format_execution_result_prompt_integration():
     out = _format_execution_result(result, "SELECT COUNT(*) AS total FROM t")
     assert "generator(s) agreed" not in out
     assert "total" in out.lower() or "col_1" in out.lower()
+
+
+# ---------------------------------------------------------------------------
+# Tests for free-text pairwise comparison
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_final_anchor_parser_robustness():
+    """'FINAL: B' at end is parsed correctly even when response starts with article 'a'."""
+    candidates = [
+        _make_candidate("SELECT id FROM t", "reasoning_A1", [(1,)], confidence=0.9),
+        _make_candidate("SELECT val FROM t", "standard_B1_s1", [(2,)], confidence=0.8),
+    ]
+
+    async def respond_with_b(**kwargs):
+        # The response begins with the English article "a" — old regex would return "A".
+        # The FINAL: anchor must correctly identify B as the winner.
+        return LLMResponse(
+            tool_inputs=[],
+            text=(
+                "a careful look at the execution results shows that candidate B "
+                "handles the aggregation correctly and avoids the extra JOIN.\n"
+                "FINAL: B"
+            ),
+            thinking=None,
+            input_tokens=100,
+            output_tokens=40,
+        )
+
+    mock_client = AsyncMock()
+    mock_client.generate = respond_with_b
+
+    with (
+        patch("src.selection.adaptive_selector.execute_sql", side_effect=_patch_execute_sql(candidates)),
+        patch("src.selection.adaptive_selector.get_client", return_value=mock_client),
+    ):
+        selector = AdaptiveSelector()
+        result = await selector.select(
+            candidates=candidates,
+            question="Get value",
+            evidence="",
+            schemas=_make_schemas(),
+            db_path="/fake/db.sqlite",
+        )
+
+    assert result.final_sql == "SELECT val FROM t", (
+        f"Expected B's SQL (article-'a' bug fix), got {result.final_sql!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_llm_error_defaults_to_a():
+    """When generate() raises LLMError, the comparison defaults to candidate A."""
+    from src.llm.base import LLMError
+
+    candidates = [
+        _make_candidate("SELECT id FROM t", "reasoning_A1", [(1,)], confidence=0.9),
+        _make_candidate("SELECT val FROM t", "standard_B1_s1", [(2,)], confidence=0.8),
+    ]
+
+    async def always_fails(**kwargs):
+        raise LLMError("network timeout")
+
+    mock_client = AsyncMock()
+    mock_client.generate = always_fails
+
+    with (
+        patch("src.selection.adaptive_selector.execute_sql", side_effect=_patch_execute_sql(candidates)),
+        patch("src.selection.adaptive_selector.get_client", return_value=mock_client),
+    ):
+        selector = AdaptiveSelector()
+        result = await selector.select(
+            candidates=candidates,
+            question="Get value",
+            evidence="",
+            schemas=_make_schemas(),
+            db_path="/fake/db.sqlite",
+        )
+
+    # LLMError → winner_letter stays "A" → representative A's SQL
+    assert result.final_sql == "SELECT id FROM t", (
+        f"Expected A's SQL (LLMError default), got {result.final_sql!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_single_api_call_per_pair():
+    """Each pairwise comparison makes exactly 1 API call (no multi-tier fallback)."""
+    # 2 clusters → C(2,2) = 1 comparison → exactly 1 API call
+    candidates = [
+        _make_candidate("SELECT id FROM t", "reasoning_A1", [(1,)], confidence=0.9),
+        _make_candidate("SELECT val FROM t", "standard_B1_s1", [(2,)], confidence=0.8),
+    ]
+    mock_client = _make_mock_client("A")
+
+    with (
+        patch("src.selection.adaptive_selector.execute_sql", side_effect=_patch_execute_sql(candidates)),
+        patch("src.selection.adaptive_selector.get_client", return_value=mock_client),
+    ):
+        selector = AdaptiveSelector()
+        result = await selector.select(
+            candidates=candidates,
+            question="Get data",
+            evidence="",
+            schemas=_make_schemas(),
+            db_path="/fake/db.sqlite",
+        )
+
+    assert result.selection_method == "tournament"
+    assert mock_client.generate.call_count == 1, (
+        f"Expected exactly 1 API call for 1 pair, got {mock_client.generate.call_count}"
+    )

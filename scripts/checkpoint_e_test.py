@@ -77,25 +77,31 @@ _OUTPUT_DIR = _BASE / "checkpoint_E_review"
 # ---------------------------------------------------------------------------
 # Per-stage timeouts (seconds)
 # ---------------------------------------------------------------------------
-# Grounding: fast LSH + FAISS lookup, no LLM
-_TIMEOUT_GROUNDING = 30
+# Grounding: LSH lookup + FAISS query + few-shot embedding. Large indexes (e.g.
+# codebase_community ~326K entries) can take >30s under CPU pressure; 300s ensures
+# no stage ever times out regardless of index size or API latency spikes.
+_TIMEOUT_GROUNDING = 300
 # Schema linking: up to 2 gemini-2.5-pro calls; wide schemas (115+ cols) can
 # take 60-90s for S1 alone. With 3 retries + exponential backoff the worst-case
 # wall time is ~3×60 + 32 ≈ 212s, so 300s gives comfortable headroom.
 _TIMEOUT_SCHEMA_LINKING = 300
-# Generation: 11 candidates run concurrently (4 reasoning + 2 standard +
-# 2 complex + 3 ICL); reasoning uses extended thinking so allow 300s to
-# handle Gemini API latency variability (was 120s, caused 4/33 timeouts).
-_TIMEOUT_GENERATION = 300
+# Per-generator timeouts — each generator is wrapped independently so a slow
+# generator (e.g. reasoning with extended thinking) never blocks the others.
+# All set to 300s so no generator can stall the pipeline indefinitely.
+_TIMEOUT_GEN_REASONING = 300
+_TIMEOUT_GEN_STANDARD  = 300
+_TIMEOUT_GEN_ICL       = 300
 # Fixing: β=2 iterations × ~15s each per candidate, but candidates are fixed
-# concurrently; 120s covers 11 concurrent candidates × β=2 with API latency headroom.
-_TIMEOUT_FIXING = 120
+# concurrently; 300s gives ample headroom for any API latency variability.
+_TIMEOUT_FIXING = 300
 # Selection: fast_path is instant; tournament pairwise calls ~5s each × ~5
-# comparisons = 25s max. 45s gives comfortable headroom.
-_TIMEOUT_SELECTION = 45
+# comparisons = 25s max. 300s is generous headroom against API latency spikes.
+_TIMEOUT_SELECTION = 300
 # Safety-net total: sum of all per-stage timeouts + 30s overhead.
-# This outer timeout only fires if a stage's internal timeout somehow leaks.
-_TIMEOUT_TOTAL_SAFETY = _TIMEOUT_GROUNDING + _TIMEOUT_SCHEMA_LINKING + _TIMEOUT_GENERATION + _TIMEOUT_FIXING + _TIMEOUT_SELECTION + 30
+# Generation contributes max(per-generator timeouts) = 300s.
+_TIMEOUT_TOTAL_SAFETY = (_TIMEOUT_GROUNDING + _TIMEOUT_SCHEMA_LINKING
+                         + max(_TIMEOUT_GEN_REASONING, _TIMEOUT_GEN_STANDARD, _TIMEOUT_GEN_ICL)
+                         + _TIMEOUT_FIXING + _TIMEOUT_SELECTION + 30)
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +359,27 @@ def _compute_schema_recall(
 
 
 # ---------------------------------------------------------------------------
+# Per-generator timeout helper
+# ---------------------------------------------------------------------------
+
+async def _run_generator_with_timeout(coro, timeout_secs: int, gen_name: str) -> list:
+    """Run a generator coroutine with an individual timeout.
+
+    Returns an empty list on timeout so the other generators' candidates are
+    still collected.  Non-timeout exceptions are re-raised so the outer
+    asyncio.gather(return_exceptions=True) can log them.
+    """
+    try:
+        return await asyncio.wait_for(coro, timeout=timeout_secs)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "  [Generation] %s timed out after %ds — skipping this generator",
+            gen_name, timeout_secs,
+        )
+        return []
+
+
+# ---------------------------------------------------------------------------
 # Per-question processing
 # ---------------------------------------------------------------------------
 
@@ -588,29 +615,38 @@ async def process_question(
         standard_gen = StandardAndComplexGenerator()
         icl_gen = ICLGenerator()
 
-        gen_results = await asyncio.wait_for(
-            asyncio.gather(
+        gen_results = await asyncio.gather(
+            _run_generator_with_timeout(
                 reasoning_gen.generate(
                     question=question,
                     evidence=evidence,
                     schemas=linked_schemas,
                     grounding=grounding_ctx,
                 ),
+                _TIMEOUT_GEN_REASONING,
+                "reasoning",
+            ),
+            _run_generator_with_timeout(
                 standard_gen.generate(
                     question=question,
                     evidence=evidence,
                     schemas=linked_schemas,
                     grounding=grounding_ctx,
                 ),
+                _TIMEOUT_GEN_STANDARD,
+                "standard",
+            ),
+            _run_generator_with_timeout(
                 icl_gen.generate(
                     question=question,
                     evidence=evidence,
                     schemas=linked_schemas,
                     grounding=grounding_ctx,
                 ),
-                return_exceptions=True,
+                _TIMEOUT_GEN_ICL,
+                "icl",
             ),
-            timeout=_TIMEOUT_GENERATION,
+            return_exceptions=True,
         )
 
         reasoning_candidates = gen_results[0] if not isinstance(gen_results[0], Exception) else []
@@ -670,13 +706,6 @@ async def process_question(
                 pre_fix_oracle_count, len(all_candidates),
             )
 
-    except asyncio.TimeoutError:
-        err_msg = f"Generation timed out after {_TIMEOUT_GENERATION}s"
-        result_record["stages"]["generation"]["error"] = err_msg
-        if result_record["error_stage"] is None:
-            result_record["error_stage"] = "generation_timeout"
-        logger.error("  [Generation] TIMEOUT after %ds — no candidates produced", _TIMEOUT_GENERATION)
-        all_candidates = []
     except Exception as exc:
         err_msg = f"{type(exc).__name__}: {exc}"
         result_record["stages"]["generation"]["error"] = err_msg
