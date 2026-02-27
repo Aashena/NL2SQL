@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Optional
 
 from src.llm import get_client, CacheableText, LLMClient, LLMError, ToolParam, sanitize_prompt_text
 from src.config.settings import settings
+from src.monitoring.fallback_tracker import FallbackEvent, get_tracker
 
 if TYPE_CHECKING:
     from src.indexing.faiss_index import FAISSIndex, FieldMatch
@@ -529,6 +530,7 @@ async def link_schema(
     LinkedSchemas with s1_fields, s2_fields, rendered DDL+Markdown for each.
     """
     evidence_str = evidence if evidence else "None"
+    _slct = get_tracker().module_tracker("schema_linker")
 
     # Sanitize question and evidence before embedding in tool-use prompts.
     # Gemini's function-call parser fails on backtick-quoted identifiers,
@@ -564,6 +566,12 @@ async def link_schema(
             "FAISS pre-filter query OS error (broken pipe?): %s — "
             "falling back to empty candidate list",
             exc,
+        )
+        _slct.record(
+            trigger="io_error",
+            action="faiss_fallback_empty",
+            details={"error": str(exc), "stage": "faiss_prefilter"},
+            severity="critical",
         )
         faiss_results = []
 
@@ -649,14 +657,30 @@ async def link_schema(
                     "Schema linker S1: 'selected_fields' is not a list (%r); treating as empty",
                     type(raw_s1).__name__,
                 )
+                _slct.record(
+                    trigger="validation_error",
+                    action="empty_result",
+                    details={"stage": "s1", "field_type": type(raw_s1).__name__},
+                )
                 raw_s1 = []
             s1_raw: list[dict] = [f for f in raw_s1 if isinstance(f, dict)]
         else:
             logger.warning("Schema linker S1: no tool_inputs in response; using FAISS fallback")
+            _slct.record(
+                trigger="empty_output",
+                action="faiss_fallback",
+                details={"stage": "s1"},
+            )
             s1_raw = []
     except LLMError as exc:
         logger.error(
             "Schema linker S1 LLM call failed (%s); falling back to FAISS top-15 as S1.", exc
+        )
+        _slct.record(
+            trigger="llm_error",
+            action="faiss_top15_as_s1",
+            details={"stage": "s1", "error": str(exc), "candidate_count": len(candidates)},
+            severity="error",
         )
         s1_raw = [
             {"table": t, "column": c, "reason": "FAISS-rank-fallback", "role": "where"}
@@ -679,6 +703,11 @@ async def link_schema(
         else:
             logger.warning(
                 "Hallucinated field filtered out from S₁: %s.%s", t, c
+            )
+            _slct.record(
+                trigger="validation_error",
+                action="hallucinated_field_filtered",
+                details={"stage": "s1", "table": t, "column": c},
             )
 
     # ------------------------------------------------------------------
@@ -738,6 +767,12 @@ async def link_schema(
                 "FAISS hint query OS error (broken pipe?): %s — skipping hint %r",
                 exc,
                 hint,
+            )
+            _slct.record(
+                trigger="io_error",
+                action="skip_hint",
+                details={"hint": hint, "error": str(exc)},
+                severity="critical",
             )
             continue
         for fm in hint_results:
@@ -842,6 +877,11 @@ async def link_schema(
                         "Schema linker S2: 'selected_fields' is not a list (%r); treating as empty",
                         type(raw_s2).__name__,
                     )
+                    _slct.record(
+                        trigger="validation_error",
+                        action="empty_result",
+                        details={"stage": "s2", "field_type": type(raw_s2).__name__},
+                    )
                     raw_s2 = []
                 s2_raw: list[dict] = [f for f in raw_s2 if isinstance(f, dict)]
             elif response_s2.finish_reason and "MAX_TOKENS" in str(response_s2.finish_reason):
@@ -853,6 +893,15 @@ async def link_schema(
                     "(finish_reason=%s); trying text-based fallback",
                     response_s2.finish_reason,
                 )
+                _slct.record(
+                    trigger="max_tokens",
+                    action="text_fallback",
+                    details={
+                        "stage": "s2",
+                        "finish_reason": str(response_s2.finish_reason),
+                        "remaining_candidates": len(remaining_candidates),
+                    },
+                )
                 s2_raw = await _s2_text_fallback(
                     client=client,
                     system_block_1=system_block_1,
@@ -861,10 +910,21 @@ async def link_schema(
                 )
             else:
                 logger.warning("Schema linker S2: no tool_inputs in response; using S1 as S2")
+                _slct.record(
+                    trigger="empty_output",
+                    action="s1_as_s2",
+                    details={"stage": "s2"},
+                )
                 s2_raw = []
         except LLMError as exc:
             logger.error(
                 "Schema linker S2 LLM call failed (%s); using S1 as S2 fallback.", exc
+            )
+            _slct.record(
+                trigger="llm_error",
+                action="s1_as_s2",
+                details={"stage": "s2", "error": str(exc)},
+                severity="error",
             )
             s2_raw = []
 
@@ -882,6 +942,11 @@ async def link_schema(
             else:
                 logger.warning(
                     "Hallucinated field filtered out from S₂: %s.%s", t, c
+                )
+                _slct.record(
+                    trigger="validation_error",
+                    action="hallucinated_field_filtered",
+                    details={"stage": "s2", "table": t, "column": c},
                 )
 
         # S₂ = S₁ ∪ S₂_new ∪ their PKs/FKs

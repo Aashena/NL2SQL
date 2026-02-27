@@ -24,6 +24,7 @@ from src.generation.base_generator import (
 )
 from src.llm import CacheableText, ThinkingConfig, get_client
 from src.config.settings import settings
+from src.monitoring.fallback_tracker import FallbackEvent, get_tracker
 
 if TYPE_CHECKING:
     from src.grounding.context_grounder import GroundingContext
@@ -158,6 +159,13 @@ class ReasoningGenerator:
             logger.error(
                 "ReasoningGenerator %s failed: %s", candidate_id, exc
             )
+            get_tracker().record(FallbackEvent(
+                component="reasoning_generator",
+                trigger="llm_error",
+                action="empty_result",
+                details={"candidate_id": candidate_id, "error": str(exc), "schema_used": schema_used},
+                severity="error",
+            ))
             return SQLCandidate(
                 sql="",
                 generator_id=f"reasoning_{candidate_id}",

@@ -20,6 +20,7 @@ from src.generation.base_generator import (
 )
 from src.llm import CacheableText, get_client
 from src.config.settings import settings
+from src.monitoring.fallback_tracker import FallbackEvent, get_tracker
 
 if TYPE_CHECKING:
     from src.grounding.context_grounder import GroundingContext, ExampleEntry
@@ -161,6 +162,13 @@ class ICLGenerator:
                 )
             except Exception as exc:
                 logger.error("ICLGenerator %s failed: %s", candidate_id, exc)
+                get_tracker().record(FallbackEvent(
+                    component="icl_generator",
+                    trigger="llm_error",
+                    action="empty_result",
+                    details={"candidate_id": candidate_id, "error": str(exc), "max_tokens": max_tokens},
+                    severity="error",
+                ))
                 return SQLCandidate(
                     sql="",
                     generator_id=candidate_id,
@@ -180,6 +188,12 @@ class ICLGenerator:
                         candidate_id,
                         max_tokens,
                     )
+                    get_tracker().record(FallbackEvent(
+                        component="icl_generator",
+                        trigger="max_tokens",
+                        action="empty_result",
+                        details={"candidate_id": candidate_id, "max_tokens_cap": _MAX_TOKENS_CAP, "at_tokens": max_tokens},
+                    ))
                     return SQLCandidate(
                         sql="",
                         generator_id=candidate_id,
@@ -194,6 +208,12 @@ class ICLGenerator:
                     max_tokens,
                     next_tokens,
                 )
+                get_tracker().record(FallbackEvent(
+                    component="icl_generator",
+                    trigger="max_tokens",
+                    action="token_escalation",
+                    details={"candidate_id": candidate_id, "from_max_tokens": max_tokens, "to_max_tokens": next_tokens},
+                ))
                 max_tokens = next_tokens
                 continue
 

@@ -20,6 +20,7 @@ from src.generation.base_generator import (
 )
 from src.llm import CacheableText, get_client
 from src.config.settings import settings
+from src.monitoring.fallback_tracker import FallbackEvent, get_tracker
 
 if TYPE_CHECKING:
     from src.grounding.context_grounder import GroundingContext
@@ -171,6 +172,13 @@ class StandardAndComplexGenerator:
             logger.error(
                 "StandardAndComplexGenerator %s failed: %s", candidate_id, exc
             )
+            get_tracker().record(FallbackEvent(
+                component="standard_generator",
+                trigger="llm_error",
+                action="empty_result",
+                details={"candidate_id": candidate_id, "error": str(exc), "schema_used": schema_used},
+                severity="error",
+            ))
             return SQLCandidate(
                 sql="",
                 generator_id=candidate_id,
@@ -192,6 +200,12 @@ class StandardAndComplexGenerator:
                 "(partial text discarded)",
                 candidate_id,
             )
+            get_tracker().record(FallbackEvent(
+                component="standard_generator",
+                trigger="max_tokens",
+                action="empty_result",
+                details={"candidate_id": candidate_id, "schema_used": schema_used},
+            ))
             return SQLCandidate(
                 sql="",
                 generator_id=candidate_id,

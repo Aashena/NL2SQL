@@ -22,7 +22,8 @@ from typing import TYPE_CHECKING, Optional
 
 from src.config.settings import settings
 from src.data.database import ExecutionResult, execute_sql
-from src.llm import CacheableText, LLMError, ToolParam, get_client, sanitize_prompt_text
+from src.llm import CacheableText, LLMError, get_client, sanitize_prompt_text
+from src.monitoring.fallback_tracker import FallbackEvent, get_tracker
 
 if TYPE_CHECKING:
     from src.fixing.query_fixer import FixedCandidate
@@ -44,27 +45,6 @@ class SelectionResult:
     confidence: float
     cluster_count: int
     candidates_evaluated: int
-
-
-# ---------------------------------------------------------------------------
-# Tool definition for pairwise comparison
-# ---------------------------------------------------------------------------
-
-_SELECT_WINNER_TOOL = ToolParam(
-    name="select_winner",
-    description=(
-        "Select the SQL candidate that better answers the question. "
-        "Consider execution results, row counts, column values, and SQL correctness."
-    ),
-    input_schema={
-        "type": "object",
-        "properties": {
-            "winner": {"type": "string", "enum": ["A", "B"]},
-            "reason": {"type": "string"},
-        },
-        "required": ["winner"],
-    },
-)
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +330,13 @@ class AdaptiveSelector:
         """
         if not candidates:
             logger.warning("AdaptiveSelector received empty candidate list — returning fallback.")
+            get_tracker().record(FallbackEvent(
+                component="adaptive_selector",
+                trigger="empty_candidates",
+                action="empty_result",
+                severity="warning",
+                details={},
+            ))
             return SelectionResult(
                 final_sql="",
                 selection_method="fallback",
@@ -369,6 +356,18 @@ class AdaptiveSelector:
                 "Fewer than 2 executable candidates (found %d); using fallback.",
                 len(executable),
             )
+            get_tracker().record(FallbackEvent(
+                component="adaptive_selector",
+                trigger="empty_candidates",
+                action="highest_confidence_fallback",
+                severity="warning",
+                details={
+                    "executable_count": len(executable),
+                    "total_candidates": len(candidates),
+                    "best_generator": best.generator_id,
+                    "best_confidence": best.confidence_score,
+                },
+            ))
             return SelectionResult(
                 final_sql=best.final_sql,
                 selection_method="fallback",
@@ -454,73 +453,79 @@ class AdaptiveSelector:
             idx_a: int,
             idx_b: int,
         ) -> Optional[str]:
-            """Run a single pairwise comparison; return generator_id of winner."""
-            _, cand_a, result_a, size_a = representatives[idx_a]
-            _, cand_b, result_b, size_b = representatives[idx_b]
+            """Run a single pairwise comparison; return generator_id of winner.
 
-            result_a_str = _format_execution_result(result_a, cand_a.final_sql)
-            result_b_str = _format_execution_result(result_b, cand_b.final_sql)
+            Uses a single free-text call (no tool-use) so Gemini MALFORMED_FUNCTION_CALL
+            cannot occur.  The model reasons freely then commits with a 'FINAL: A' or
+            'FINAL: B' line that is parsed unambiguously.
+            """
+            import re as _re_local
 
-            # Sanitize user-supplied and LLM-generated text before embedding in a
-            # tool-use prompt.  Gemini's function-call parser fails (MALFORMED_FUNCTION_CALL)
-            # on backtick-quoted identifiers and control characters — the same fix
-            # that was applied to schema_linker.py and context_grounder.py.
+            _, cand_a, result_a, _ = representatives[idx_a]
+            _, cand_b, result_b, _ = representatives[idx_b]
+
             safe_question = sanitize_prompt_text(question)
             safe_evidence = sanitize_prompt_text(evidence or "None")
-            safe_sql_a = sanitize_prompt_text(cand_a.final_sql)
-            safe_sql_b = sanitize_prompt_text(cand_b.final_sql)
+            safe_sql_a    = sanitize_prompt_text(cand_a.final_sql)
+            safe_sql_b    = sanitize_prompt_text(cand_b.final_sql)
+            safe_schema   = sanitize_prompt_text(schemas.s2_markdown)
+            safe_result_a = sanitize_prompt_text(_format_execution_result(result_a, cand_a.final_sql))
+            safe_result_b = sanitize_prompt_text(_format_execution_result(result_b, cand_b.final_sql))
 
             prompt = (
-                "You are evaluating two SQL queries for a natural language question. "
-                "Choose which query better answers the question based on the schema "
-                "and execution results.\n\n"
+                "You are evaluating two SQL queries for a natural language question.\n"
+                "Analyze which query better answers the question based on the schema and results.\n\n"
                 f"Question: {safe_question}\n"
                 f"Evidence: {safe_evidence}\n"
-                f"Database Schema (filtered):\n{schemas.s2_markdown}\n\n"
+                f"Database Schema (filtered):\n{safe_schema}\n\n"
                 f"Candidate A (generated by {cand_a.generator_id}):\n"
                 f"{safe_sql_a}\n\n"
                 f"=== Candidate A Execution Result ===\n"
-                f"{result_a_str}\n\n"
+                f"{safe_result_a}\n\n"
                 f"Candidate B (generated by {cand_b.generator_id}):\n"
                 f"{safe_sql_b}\n\n"
                 f"=== Candidate B Execution Result ===\n"
-                f"{result_b_str}\n\n"
-                "Given the question, evidence, schema, and both execution results above, "
-                "which SQL better answers the question? "
-                "Consider: row counts, column values, and the correctness of the SQL logic."
+                f"{safe_result_b}\n\n"
+                "Think through which SQL better answers the question. Consider: row counts, "
+                "column values, join correctness, aggregation logic, and NULL handling.\n"
+                "After your analysis, write your final answer on the last line as exactly:\n"
+                "FINAL: A\nor\nFINAL: B"
             )
 
+            _system = [CacheableText(text="You are an expert SQL evaluator.", cache=False)]
+
+            def _parse_winner(text: str) -> str:
+                """Extract winner from 'FINAL: A' or 'FINAL: B' at end of response."""
+                m = _re_local.search(r'FINAL:\s*([AB])', text.upper())
+                return m.group(1) if m else "A"
+
+            winner_letter = "A"
             try:
                 client = get_client()
                 response = await client.generate(
                     model=settings.model_fast,
-                    system=[CacheableText(text="You are an expert SQL evaluator.", cache=False)],
+                    system=_system,
                     messages=[{"role": "user", "content": prompt}],
-                    tools=[_SELECT_WINNER_TOOL],
-                    tool_choice_name="select_winner",
-                    max_tokens=256,
+                    tools=[],
+                    max_tokens=512,
                     temperature=0.0,
                 )
-                if response.tool_inputs:
-                    winner_letter = response.tool_inputs[0].get("winner", "A")
-                else:
-                    winner_letter = "A"
-
-                if winner_letter not in ("A", "B"):
-                    logger.warning(
-                        "Pairwise comparison returned invalid winner %r; defaulting to A",
-                        winner_letter,
-                    )
-                    winner_letter = "A"
-
-                if winner_letter == "A":
-                    return cand_a.generator_id
-                else:
-                    return cand_b.generator_id
-
+                winner_letter = _parse_winner(response.text or "")
             except LLMError as exc:
                 logger.warning("Pairwise comparison failed: %s; defaulting to A.", exc)
-                return cand_a.generator_id
+                get_tracker().record(FallbackEvent(
+                    component="adaptive_selector",
+                    trigger="llm_error",
+                    action="default_winner_a",
+                    severity="warning",
+                    details={
+                        "candidate_a": cand_a.generator_id,
+                        "candidate_b": cand_b.generator_id,
+                        "error": str(exc),
+                    },
+                ))
+
+            return cand_a.generator_id if winner_letter == "A" else cand_b.generator_id
 
         # Run all C(m,2) comparisons concurrently
         pair_tasks = [
