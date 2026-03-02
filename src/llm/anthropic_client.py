@@ -11,6 +11,7 @@ Features:
 from typing import Any, Optional
 
 import anthropic
+import httpx
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -24,7 +25,13 @@ from src.llm.base import CacheableText, LLMClient, LLMError, LLMRateLimitError, 
 class AnthropicClient(LLMClient):
 
     def __init__(self, api_key: str) -> None:
-        self._client = anthropic.AsyncAnthropic(api_key=api_key)
+        # Explicit per-operation timeouts prevent asyncio SSL connections from hanging
+        # indefinitely when the network drops mid-transfer. Without a read timeout,
+        # tenacity never gets a chance to retry because the await never returns.
+        self._client = anthropic.AsyncAnthropic(
+            api_key=api_key,
+            timeout=httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=10.0),
+        )
 
     async def _generate_single(
         self,

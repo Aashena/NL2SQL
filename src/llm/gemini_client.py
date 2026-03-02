@@ -30,6 +30,13 @@ from src.monitoring.fallback_tracker import FallbackEvent, get_tracker
 
 logger = logging.getLogger(__name__)
 
+# Gemini context caching requires a minimum of 1024 tokens in the cached block.
+# We use a conservative character-based proxy (~4 chars per token for English/SQL)
+# to skip cache creation when the content is clearly below the threshold, avoiding
+# a guaranteed 400 INVALID_ARGUMENT round-trip.
+_GEMINI_MIN_CACHE_TOKENS = 1024
+_CHARS_PER_TOKEN_ESTIMATE = 4
+
 
 def _is_rate_limit_error(exc: Exception) -> bool:
     """Return True if exc is a Gemini quota exhaustion / rate limit error."""
@@ -48,8 +55,14 @@ class GeminiClient(LLMClient):
     def __init__(self, api_key: str) -> None:
         try:
             from google import genai  # type: ignore[import]
+            from google.genai import types as genai_types  # type: ignore[import]
             self._genai = genai
-            self._client = genai.Client(api_key=api_key)
+            # Explicit timeout prevents asyncio SSL connections from hanging
+            # indefinitely when the network drops mid-transfer (read=120s).
+            self._client = genai.Client(
+                api_key=api_key,
+                http_options=genai_types.HttpOptions(timeout=120),
+            )
         except ImportError as exc:
             raise ImportError(
                 "google-genai is required for Gemini support. "
@@ -113,9 +126,22 @@ class GeminiClient(LLMClient):
                 cache_name = self._cache_store[cache_key]
                 logger.debug("Gemini context cache hit: %s", cache_name)
             else:
-                cache_name = await self._try_create_cache(model, cacheable_text)
-                if cache_name is not None:
-                    self._cache_store[cache_key] = cache_name
+                # Pre-flight token estimate: skip cache creation entirely if the
+                # content is clearly below Gemini's 1024-token minimum, avoiding
+                # a guaranteed 400 INVALID_ARGUMENT round-trip.
+                estimated_tokens = len(cacheable_text) // _CHARS_PER_TOKEN_ESTIMATE
+                if estimated_tokens < _GEMINI_MIN_CACHE_TOKENS:
+                    logger.debug(
+                        "Gemini cache skipped: estimated tokens %d < %d minimum "
+                        "(text len=%d chars) — proceeding without cache",
+                        estimated_tokens,
+                        _GEMINI_MIN_CACHE_TOKENS,
+                        len(cacheable_text),
+                    )
+                else:
+                    cache_name = await self._try_create_cache(model, cacheable_text)
+                    if cache_name is not None:
+                        self._cache_store[cache_key] = cache_name
 
         # --- Build tool/tool_config kwargs (omit entirely when no tools) ---
         tool_kwargs: dict = {
