@@ -32,7 +32,12 @@ from src.schema_linking.schema_linker import LinkedSchemas
 from src.generation.base_generator import SQLCandidate
 from src.fixing.query_fixer import FixedCandidate
 from src.data.database import ExecutionResult
-from src.pipeline.online_pipeline import PipelineResult, answer_question
+from src.pipeline.online_pipeline import (
+    PipelineResult,
+    answer_question,
+    GENERATOR_TIMEOUT_S,
+    QUESTION_SOFT_TIMEOUT_S,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -308,7 +313,7 @@ async def test_pipeline_result_has_metadata(tmp_path):
             result = await answer_question(entry, artifacts, db_path)
 
         assert result.cluster_count >= 0
-        assert result.selection_method in {"fast_path", "tournament", "fallback"}
+        assert result.selection_method in {"fast_path", "tournament", "fallback", "timeout_fallback"}
         assert result.candidates_evaluated >= 0
     finally:
         os.unlink(db_path)
@@ -506,5 +511,107 @@ async def test_async_generators_run_in_parallel(tmp_path):
         assert len(standard_called) >= 1, "StandardAndComplexGenerator.generate was not called"
         assert len(icl_called) >= 1, "ICLGenerator.generate was not called"
         assert isinstance(result, PipelineResult)
+    finally:
+        os.unlink(db_path)
+
+
+# ---------------------------------------------------------------------------
+# Test 7: Slow generator is cancelled; pipeline proceeds with partial results
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_slow_generator_timeout_yields_partial_results(tmp_path):
+    """A generator that sleeps past GENERATOR_TIMEOUT_S is cancelled and
+    the pipeline still returns a valid result from the remaining generators."""
+    db_path = _make_temp_db()
+    try:
+        entry = _make_entry()
+        artifacts = _make_mock_artifacts(db_path)
+        mock_client = _make_mock_client()
+
+        async def _mock_fast_generate(**kwargs):
+            return [
+                SQLCandidate(
+                    sql=_VALID_SQL,
+                    generator_id="reasoning_A1",
+                    schema_used="s1",
+                    schema_format="ddl",
+                    reasoning_trace=None,
+                    error_flag=False,
+                )
+            ]
+
+        async def _mock_slow_generate(**kwargs):
+            # Sleep much longer than GENERATOR_TIMEOUT_S; should be cancelled
+            await asyncio.sleep(GENERATOR_TIMEOUT_S + 60)
+            return []  # unreachable — cancellation fires first
+
+        with patch.multiple(
+            "src.grounding.context_grounder",
+            get_client=MagicMock(return_value=mock_client),
+        ), patch.multiple(
+            "src.schema_linking.schema_linker",
+            get_client=MagicMock(return_value=mock_client),
+        ), patch.multiple(
+            "src.fixing.query_fixer",
+            get_client=MagicMock(return_value=mock_client),
+        ), patch.multiple(
+            "src.selection.adaptive_selector",
+            get_client=MagicMock(return_value=mock_client),
+        ), patch(
+            "src.pipeline.online_pipeline._reasoning_generator.generate",
+            side_effect=_mock_fast_generate,
+        ), patch(
+            "src.pipeline.online_pipeline._standard_generator.generate",
+            side_effect=_mock_fast_generate,
+        ), patch(
+            "src.pipeline.online_pipeline._icl_generator.generate",
+            side_effect=_mock_slow_generate,
+        ), patch(
+            # Reduce timeout to 2 s so the test runs quickly
+            "src.pipeline.online_pipeline.GENERATOR_TIMEOUT_S",
+            2,
+        ):
+            result = await answer_question(entry, artifacts, db_path)
+
+        # The pipeline must not crash and must return a result using the 2 fast generators
+        assert isinstance(result, PipelineResult)
+        assert result.final_sql  # non-empty — fast generators produced candidates
+    finally:
+        os.unlink(db_path)
+
+
+# ---------------------------------------------------------------------------
+# Test 8: Soft question timeout returns graceful fallback
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_question_soft_timeout_returns_fallback(tmp_path):
+    """When the entire pipeline exceeds QUESTION_SOFT_TIMEOUT_S the function
+    returns a graceful timeout_fallback PipelineResult instead of hanging."""
+    db_path = _make_temp_db()
+    try:
+        entry = _make_entry()
+        artifacts = _make_mock_artifacts(db_path)
+        mock_client = _make_mock_client()
+
+        async def _mock_hanging_ground_context(**kwargs):
+            # Simulate a completely hung Op 5 (no API response ever arrives)
+            await asyncio.sleep(QUESTION_SOFT_TIMEOUT_S + 60)
+            raise RuntimeError("should not be reached")  # pragma: no cover
+
+        with patch(
+            "src.pipeline.online_pipeline.ground_context",
+            side_effect=_mock_hanging_ground_context,
+        ), patch(
+            # Reduce soft timeout to 1 s so the test is fast
+            "src.pipeline.online_pipeline.QUESTION_SOFT_TIMEOUT_S",
+            1,
+        ):
+            result = await answer_question(entry, artifacts, db_path)
+
+        assert isinstance(result, PipelineResult)
+        assert result.selection_method == "timeout_fallback"
+        assert result.final_sql == ""
     finally:
         os.unlink(db_path)

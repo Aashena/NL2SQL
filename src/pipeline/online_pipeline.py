@@ -14,6 +14,15 @@ A module-level asyncio.Semaphore(10) is exposed so that callers (e.g. the
 evaluation script) can use it to cap the number of concurrent answer_question
 invocations to N without blocking the event loop.  The semaphore is NOT
 acquired inside answer_question itself — callers wrap the call as needed.
+
+Timeout design (Root Cause 2 & 3 fix):
+  GENERATOR_TIMEOUT_S — each individual generator gets this many seconds.
+    If it exceeds the limit it is cancelled; its slot returns an empty list
+    so Op 8/9 proceed on whatever candidates arrived first.
+  QUESTION_SOFT_TIMEOUT_S — the entire answer_question() call is wrapped
+    with this deadline.  If Op 5/6 or Op 8/9 take too long the function
+    returns a graceful fallback before the external safety-net fires.
+    Set it well below the safety-net (1560 s) but above a normal question.
 """
 
 from __future__ import annotations
@@ -44,6 +53,20 @@ logger = logging.getLogger(__name__)
 #: Global semaphore that limits concurrent API calls across all pipeline runs.
 #: The evaluation script should acquire this before calling answer_question.
 PIPELINE_SEMAPHORE: asyncio.Semaphore = asyncio.Semaphore(10)
+
+# ---------------------------------------------------------------------------
+# Timeout constants
+# ---------------------------------------------------------------------------
+
+#: Maximum seconds to wait for a single Op 7 generator.
+#: Extended thinking on complex schemas can take 60–90 s; 120 s is generous
+#: but still prevents a single hung generator from blocking the pipeline.
+GENERATOR_TIMEOUT_S: int = 120
+
+#: Soft per-question deadline in seconds.  The whole answer_question() body
+#: is wrapped with this limit.  If it fires, a graceful fallback PipelineResult
+#: is returned.  Must be well below the external safety-net (typically 1560 s).
+QUESTION_SOFT_TIMEOUT_S: int = 300
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +120,34 @@ async def answer_question(
     -------
     PipelineResult with the best SQL and selection metadata.
     """
+    try:
+        return await asyncio.wait_for(
+            _answer_question_inner(entry, artifacts, db_path),
+            timeout=QUESTION_SOFT_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        db_id = entry.db_id
+        logger.warning(
+            "[%s] answer_question() exceeded soft timeout of %ds — returning empty fallback",
+            db_id,
+            QUESTION_SOFT_TIMEOUT_S,
+        )
+        return PipelineResult(
+            final_sql="",
+            selection_method="timeout_fallback",
+            cluster_count=0,
+            candidates_evaluated=0,
+            generator_wins={},
+            total_cost_estimate=0.0,
+        )
+
+
+async def _answer_question_inner(
+    entry: "BirdEntry",
+    artifacts: "OfflineArtifacts",
+    db_path: str,
+) -> PipelineResult:
+    """Inner implementation of answer_question (wrapped by soft timeout)."""
     question = entry.question
     evidence = entry.evidence or ""
     db_id = entry.db_id
@@ -156,29 +207,62 @@ async def answer_question(
 
     # -----------------------------------------------------------------------
     # Op 7: Diverse SQL Generation (3 generators run in parallel)
+    #
+    # Each generator is individually wrapped with GENERATOR_TIMEOUT_S so that
+    # a slow or hung generator (e.g. ICL generator blocked on a long API call)
+    # cannot prevent Op 8/9 from running on the candidates that did arrive.
+    # This fixes the cascading-slowdown problem: previously a 300 s ICL call
+    # would stall the whole question and starve subsequent questions.
     # -----------------------------------------------------------------------
     logger.info("[%s] Op 7: Generating SQL candidates …", db_id)
+
+    async def _timed_generate(coro, name: str) -> list:
+        """Run a generator coroutine bounded by GENERATOR_TIMEOUT_S."""
+        try:
+            return await asyncio.wait_for(coro, timeout=GENERATOR_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[%s] Generator '%s' exceeded %ds timeout — dropping its candidates",
+                db_id, name, GENERATOR_TIMEOUT_S,
+            )
+            return []
+        except Exception as exc:
+            logger.error(
+                "[%s] Generator '%s' raised an unexpected error: %s", db_id, name, exc
+            )
+            return []
+
     gen_results = await asyncio.gather(
-        _reasoning_generator.generate(
-            question=question,
-            evidence=evidence,
-            schemas=schemas,
-            grounding=grounding,
+        _timed_generate(
+            _reasoning_generator.generate(
+                question=question,
+                evidence=evidence,
+                schemas=schemas,
+                grounding=grounding,
+            ),
+            "reasoning",
         ),
-        _standard_generator.generate(
-            question=question,
-            evidence=evidence,
-            schemas=schemas,
-            grounding=grounding,
+        _timed_generate(
+            _standard_generator.generate(
+                question=question,
+                evidence=evidence,
+                schemas=schemas,
+                grounding=grounding,
+            ),
+            "standard",
         ),
-        _icl_generator.generate(
-            question=question,
-            evidence=evidence,
-            schemas=schemas,
-            grounding=grounding,
+        _timed_generate(
+            _icl_generator.generate(
+                question=question,
+                evidence=evidence,
+                schemas=schemas,
+                grounding=grounding,
+            ),
+            "icl",
         ),
     )
-    # Flatten all candidate lists
+
+    # Flatten all candidate lists; empty lists from timed-out generators are skipped.
     candidates = [c for sublist in gen_results for c in sublist]
     logger.info(
         "[%s] Op 7: %d total candidates generated "
