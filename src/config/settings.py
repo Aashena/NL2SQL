@@ -6,11 +6,15 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     # Provider selection
-    llm_provider: Literal["anthropic", "gemini"] = "anthropic"
+    llm_provider: Literal["anthropic", "gemini", "mlx"] = "anthropic"
 
     # API keys
     anthropic_api_key: str = ""
     gemini_api_key: str = ""
+
+    # MLX local server (used when llm_provider="mlx")
+    mlx_server_url: str = Field(default="http://127.0.0.1:8080", alias="MLX_SERVER_URL")
+    mlx_model_name: str = Field(default="", alias="MLX_MODEL_NAME")
 
     # Model tiers — leave as "" to use provider defaults (filled by validator below).
     # Supports comma-separated fallback lists, e.g.:
@@ -75,10 +79,19 @@ class Settings(BaseSettings):
                 "model_reasoning": "gemini-2.5-flash",
             },
         }
-        defaults = _DEFAULTS[self.llm_provider]
-        for field_name, default_val in defaults.items():
-            if not getattr(self, field_name):
-                setattr(self, field_name, default_val)
+        if self.llm_provider in _DEFAULTS:
+            defaults = _DEFAULTS[self.llm_provider]
+            for field_name, default_val in defaults.items():
+                if not getattr(self, field_name):
+                    setattr(self, field_name, default_val)
+        elif self.llm_provider == "mlx":
+            # All three tiers default to the same local model.
+            resolved = self.mlx_model_name or "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"
+            if not self.mlx_model_name:
+                self.mlx_model_name = resolved
+            for field_name in ("model_fast", "model_powerful", "model_reasoning"):
+                if not getattr(self, field_name):
+                    setattr(self, field_name, resolved)
         return self
 
     @model_validator(mode="after")
@@ -104,6 +117,7 @@ class Settings(BaseSettings):
     model_config = {
         "env_file": ".env",
         "populate_by_name": True,
+        "extra": "ignore",
     }
 
 

@@ -58,10 +58,12 @@ class GeminiClient(LLMClient):
             from google.genai import types as genai_types  # type: ignore[import]
             self._genai = genai
             # Explicit timeout prevents asyncio SSL connections from hanging
-            # indefinitely when the network drops mid-transfer (read=120s).
+            # indefinitely when the network drops mid-transfer.
+            # NOTE: HttpOptions.timeout is in MILLISECONDS (not seconds).
+            # 120_000 ms = 120 seconds.
             self._client = genai.Client(
                 api_key=api_key,
-                http_options=genai_types.HttpOptions(timeout=120),
+                http_options=genai_types.HttpOptions(timeout=120_000),
             )
         except ImportError as exc:
             raise ImportError(
