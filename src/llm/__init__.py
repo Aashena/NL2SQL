@@ -14,7 +14,7 @@ Usage:
     )
     result = response.tool_inputs[0]  # dict with tool output
 
-Provider is selected via LLM_PROVIDER env var ("anthropic" or "gemini").
+Provider is selected via LLM_PROVIDER env var ("anthropic", "gemini", or "mlx").
 Model tier defaults are applied automatically; override with MODEL_FAST,
 MODEL_POWERFUL, MODEL_REASONING env vars.
 """
@@ -44,10 +44,16 @@ def get_client() -> LLMClient:
     elif settings.llm_provider == "gemini":
         from src.llm.gemini_client import GeminiClient
         return GeminiClient(api_key=settings.gemini_api_key)
+    elif settings.llm_provider == "mlx":
+        from src.llm.mlx_client import MLXClient
+        return MLXClient(
+            server_url=settings.mlx_server_url,
+            model_name=settings.mlx_model_name,
+        )
     else:
         raise ValueError(
             f"Unknown LLM provider: {settings.llm_provider!r}. "
-            "Set LLM_PROVIDER=anthropic or LLM_PROVIDER=gemini in .env"
+            "Set LLM_PROVIDER=anthropic, LLM_PROVIDER=gemini, or LLM_PROVIDER=mlx in .env"
         )
 
 

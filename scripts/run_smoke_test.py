@@ -343,6 +343,591 @@ async def _run_gen_with_timeout(coro, timeout_s: int, name: str) -> list:
 # Per-question processing — the heart of the smoke test
 # ---------------------------------------------------------------------------
 
+async def _process_question_body(
+    entry,
+    artifacts: dict,
+    example_store: ExampleStore,
+    question_idx: int,
+    total: int,
+) -> dict:
+    """
+    Run Ops 5–9 for one question (called after the semaphore is acquired).
+
+    """
+    db_id = entry.db_id
+    question = entry.question
+    evidence = entry.evidence or ""
+    gold_sql = entry.SQL
+    db_path = artifacts["db_path"]
+    t_total_start = time.monotonic()
+    logger.info(
+        "[%d/%d] Q#%d (%s/%s): %s",
+        question_idx + 1, total,
+        entry.question_id, db_id, entry.difficulty,
+        question[:80],
+    )
+
+    # Shared state across stages
+    grounding_ctx: Optional[GroundingContext] = None
+    linked_schemas: Optional[LinkedSchemas] = None
+    all_candidates: list = []
+    fixed_candidates: list = []
+    correct_post_fix_sqls: set[str] = set()
+
+    # ---------------------------------------------------------------
+    # Execute gold SQL upfront (reused for oracle + eval)
+    # ---------------------------------------------------------------
+    gold_exec = execute_sql(db_path, gold_sql)
+    if not gold_exec.success:
+        logger.warning("  [Gold] Gold SQL failed: %s", gold_exec.error)
+
+    # ---------------------------------------------------------------
+    # Trace dict — populated incrementally
+    # ---------------------------------------------------------------
+    trace: dict = {
+        "question_id": entry.question_id,
+        "db_id": db_id,
+        "difficulty": entry.difficulty,
+        "question": question,
+        "evidence": evidence,
+        "truth_sql": gold_sql,
+        "gold_exec_success": gold_exec.success,
+        "gold_row_count": len(gold_exec.rows) if gold_exec.success else None,
+        # Compact result fields (filled in below)
+        "predicted_sql": "",
+        "correct": False,
+        "selection_method": "error",
+        "winner_generator": "",
+        "cluster_count": 0,
+        "latency_s": 0.0,
+        "error_stage": None,
+        # Oracle metrics
+        "oracle_pre_fix": False,
+        "oracle_pre_fix_count": 0,
+        "oracle_post_fix": False,
+        "oracle_post_fix_count": 0,
+        "oracle_total_candidates": 0,
+        "selector_matched_oracle": False,
+        # Per-op detailed traces (filled below)
+        "op5": {},
+        "op6": {},
+        "op7": {},
+        "op8": {},
+        "op9": {},
+        "eval": {},
+    }
+
+    # ===================================================================
+    # Op 5: Context Grounding
+    # ===================================================================
+    t0 = time.monotonic()
+    op5: dict = {
+        "duration_s": 0.0,
+        "cell_matches": [],
+        "cell_match_count": 0,
+        "schema_hints": [],
+        "schema_hint_count": 0,
+        "few_shot_count": 0,
+        "error": None,
+    }
+    try:
+        grounding_ctx = await asyncio.wait_for(
+            ground_context(
+                question=question,
+                evidence=evidence,
+                db_id=db_id,
+                lsh_index=artifacts["lsh_index"],
+                example_store=example_store,
+            ),
+            timeout=_TIMEOUT_GROUNDING,
+        )
+        op5["cell_matches"] = [
+            {
+                "table": cm.table,
+                "column": cm.column,
+                "value": cm.matched_value,
+                "similarity": round(cm.similarity_score, 4),
+            }
+            for cm in grounding_ctx.matched_cells
+        ]
+        op5["cell_match_count"] = len(grounding_ctx.matched_cells)
+        op5["schema_hints"] = list(grounding_ctx.schema_hints)
+        op5["schema_hint_count"] = len(grounding_ctx.schema_hints)
+        op5["few_shot_count"] = len(grounding_ctx.few_shot_examples)
+        logger.info(
+            "  [Op5] cell_matches=%d, schema_hints=%d, few_shot=%d",
+            op5["cell_match_count"], op5["schema_hint_count"], op5["few_shot_count"],
+        )
+    except asyncio.TimeoutError:
+        op5["error"] = f"timeout after {_TIMEOUT_GROUNDING}s"
+        trace["error_stage"] = "op5_timeout"
+        logger.error("  [Op5] TIMEOUT after %ds", _TIMEOUT_GROUNDING)
+        grounding_ctx = GroundingContext()
+    except Exception as exc:
+        op5["error"] = f"{type(exc).__name__}: {exc}"
+        trace["error_stage"] = "op5"
+        logger.error("  [Op5] FAILED: %s", exc)
+        grounding_ctx = GroundingContext()
+    finally:
+        op5["duration_s"] = round(time.monotonic() - t0, 3)
+        trace["op5"] = op5
+
+    # ===================================================================
+    # Op 6: Adaptive Schema Linking
+    # ===================================================================
+    t0 = time.monotonic()
+    op6: dict = {
+        "duration_s": 0.0,
+        "s1_field_count": 0,
+        "s2_field_count": 0,
+        "s1_fields": [],
+        "s2_fields": [],
+        "schema_recall": {},
+        "error": None,
+    }
+    try:
+        linked_schemas = await asyncio.wait_for(
+            link_schema(
+                question=question,
+                evidence=evidence,
+                grounding_context=grounding_ctx,
+                faiss_index=artifacts["faiss_index"],
+                full_ddl=artifacts["full_ddl"],
+                full_markdown=artifacts["full_markdown"],
+                available_fields=artifacts["available_fields"],
+            ),
+            timeout=_TIMEOUT_SCHEMA_LINKING,
+        )
+        op6["s1_field_count"] = len(linked_schemas.s1_fields)
+        op6["s2_field_count"] = len(linked_schemas.s2_fields)
+        op6["s1_fields"] = [
+            [str(f[0]), str(f[1])] for f in (linked_schemas.s1_fields or [])
+        ]
+        op6["s2_fields"] = [
+            [str(f[0]), str(f[1])] for f in (linked_schemas.s2_fields or [])
+        ]
+        op6["schema_recall"] = _compute_schema_recall(
+            linked_schemas.s1_ddl,
+            linked_schemas.s2_ddl,
+            linked_schemas.s1_fields,
+            linked_schemas.s2_fields,
+            gold_sql,
+        )
+        recall = op6["schema_recall"]
+        logger.info(
+            "  [Op6] s1=%d fields, s2=%d fields | "
+            "table_recall S1=%.0f%% S2=%.0f%% | col_recall S1=%.0f%% S2=%.0f%%",
+            op6["s1_field_count"], op6["s2_field_count"],
+            recall.get("table_recall_s1", 0) * 100,
+            recall.get("table_recall_s2", 0) * 100,
+            recall.get("col_recall_s1", 0) * 100,
+            recall.get("col_recall_s2", 0) * 100,
+        )
+    except asyncio.TimeoutError:
+        op6["error"] = f"timeout after {_TIMEOUT_SCHEMA_LINKING}s — using full DDL"
+        if not trace["error_stage"]:
+            trace["error_stage"] = "op6_timeout"
+        logger.error("  [Op6] TIMEOUT — falling back to full DDL")
+        linked_schemas = LinkedSchemas(
+            s1_ddl=artifacts["full_ddl"],
+            s1_markdown=artifacts["full_markdown"],
+            s2_ddl=artifacts["full_ddl"],
+            s2_markdown=artifacts["full_markdown"],
+            s1_fields=[],
+            s2_fields=[],
+            selection_reasoning="",
+        )
+        op6["schema_recall"] = _compute_schema_recall(
+            linked_schemas.s1_ddl, linked_schemas.s2_ddl,
+            [], [], gold_sql,
+        )
+    except Exception as exc:
+        op6["error"] = f"{type(exc).__name__}: {exc}"
+        if not trace["error_stage"]:
+            trace["error_stage"] = "op6"
+        logger.error("  [Op6] FAILED: %s", exc)
+        linked_schemas = LinkedSchemas(
+            s1_ddl=artifacts["full_ddl"],
+            s1_markdown=artifacts["full_markdown"],
+            s2_ddl=artifacts["full_ddl"],
+            s2_markdown=artifacts["full_markdown"],
+            s1_fields=[],
+            s2_fields=[],
+            selection_reasoning="",
+        )
+        op6["schema_recall"] = _compute_schema_recall(
+            linked_schemas.s1_ddl, linked_schemas.s2_ddl,
+            [], [], gold_sql,
+        )
+    finally:
+        op6["duration_s"] = round(time.monotonic() - t0, 3)
+        trace["op6"] = op6
+
+    # ===================================================================
+    # Op 7: Diverse SQL Generation (3 generators in parallel)
+    # ===================================================================
+    t0 = time.monotonic()
+    op7: dict = {
+        "duration_s": 0.0,
+        "total_candidates": 0,
+        "gen_reasoning_count": 0,
+        "gen_standard_b1_count": 0,
+        "gen_complex_b2_count": 0,
+        "gen_icl_count": 0,
+        "error_flag_count": 0,
+        "candidates": [],
+        "errors": None,
+    }
+    try:
+        reasoning_gen = ReasoningGenerator()
+        standard_gen = StandardAndComplexGenerator()
+        icl_gen = ICLGenerator()
+
+        gen_results = await asyncio.gather(
+            _run_gen_with_timeout(
+                reasoning_gen.generate(
+                    question=question, evidence=evidence,
+                    schemas=linked_schemas, grounding=grounding_ctx,
+                ),
+                _TIMEOUT_GEN_REASONING, "reasoning",
+            ),
+            _run_gen_with_timeout(
+                standard_gen.generate(
+                    question=question, evidence=evidence,
+                    schemas=linked_schemas, grounding=grounding_ctx,
+                ),
+                _TIMEOUT_GEN_STANDARD, "standard",
+            ),
+            _run_gen_with_timeout(
+                icl_gen.generate(
+                    question=question, evidence=evidence,
+                    schemas=linked_schemas, grounding=grounding_ctx,
+                ),
+                _TIMEOUT_GEN_ICL, "icl",
+            ),
+            return_exceptions=True,
+        )
+
+        reasoning_cands = gen_results[0] if not isinstance(gen_results[0], Exception) else []
+        standard_cands = gen_results[1] if not isinstance(gen_results[1], Exception) else []
+        icl_cands = gen_results[2] if not isinstance(gen_results[2], Exception) else []
+
+        gen_errors = []
+        for name, res in [("reasoning", gen_results[0]), ("standard", gen_results[1]), ("icl", gen_results[2])]:
+            if isinstance(res, Exception):
+                gen_errors.append(f"{name}: {type(res).__name__}: {res}")
+
+        all_candidates = list(reasoning_cands) + list(standard_cands) + list(icl_cands)
+
+        op7["gen_reasoning_count"] = len(reasoning_cands)
+        op7["gen_standard_b1_count"] = len(
+            [c for c in standard_cands if c.generator_id.startswith("standard")]
+        )
+        op7["gen_complex_b2_count"] = len(
+            [c for c in standard_cands if c.generator_id.startswith("complex")]
+        )
+        op7["gen_icl_count"] = len(icl_cands)
+        op7["total_candidates"] = len(all_candidates)
+        op7["error_flag_count"] = sum(1 for c in all_candidates if c.error_flag)
+        op7["candidates"] = [
+            {
+                "generator_id": c.generator_id,
+                "schema_used": c.schema_used,
+                "schema_format": c.schema_format,
+                "sql": c.sql[:500] if c.sql else "",  # truncate long SQL
+                "error_flag": c.error_flag,
+            }
+            for c in all_candidates
+        ]
+        if gen_errors:
+            op7["errors"] = "; ".join(gen_errors)
+            if not trace["error_stage"]:
+                trace["error_stage"] = "op7"
+
+        logger.info(
+            "  [Op7] total=%d (reasoning=%d, B1=%d, B2=%d, icl=%d) error_flags=%d",
+            op7["total_candidates"],
+            op7["gen_reasoning_count"],
+            op7["gen_standard_b1_count"],
+            op7["gen_complex_b2_count"],
+            op7["gen_icl_count"],
+            op7["error_flag_count"],
+        )
+
+        # Oracle on pre-fix candidates
+        trace["oracle_total_candidates"] = len(all_candidates)
+        if gold_exec.success and all_candidates:
+            pre_fix_correct = 0
+            for cand in all_candidates:
+                if not cand.error_flag and cand.sql:
+                    cand_exec = execute_sql(db_path, cand.sql)
+                    if cand_exec.success and results_match(cand_exec.rows, gold_exec.rows):
+                        pre_fix_correct += 1
+            trace["oracle_pre_fix"] = pre_fix_correct > 0
+            trace["oracle_pre_fix_count"] = pre_fix_correct
+            logger.info("  [Oracle Pre-Fix] %d/%d correct", pre_fix_correct, len(all_candidates))
+
+    except Exception as exc:
+        op7["errors"] = f"{type(exc).__name__}: {exc}"
+        if not trace["error_stage"]:
+            trace["error_stage"] = "op7"
+        logger.error("  [Op7] FAILED: %s", exc)
+        logger.debug(traceback.format_exc())
+        all_candidates = []
+    finally:
+        op7["duration_s"] = round(time.monotonic() - t0, 3)
+        trace["op7"] = op7
+
+    # ===================================================================
+    # Op 8: Query Fixer
+    # ===================================================================
+    t0 = time.monotonic()
+    op8: dict = {
+        "duration_s": 0.0,
+        "total_candidates": len(all_candidates),
+        "needed_fix_count": 0,
+        "fixed_ok_count": 0,
+        "still_failing_count": 0,
+        "oracle_pre_fix": trace["oracle_pre_fix"],
+        "oracle_pre_fix_count": trace["oracle_pre_fix_count"],
+        "oracle_post_fix": False,
+        "oracle_post_fix_count": 0,
+        "candidates": [],
+        "error": None,
+    }
+
+    if all_candidates:
+        try:
+            fixer = QueryFixer()
+            fixed_candidates = await asyncio.wait_for(
+                fixer.fix_candidates(
+                    candidates=all_candidates,
+                    question=question,
+                    evidence=evidence,
+                    schemas=linked_schemas,
+                    db_path=db_path,
+                    cell_matches=grounding_ctx.matched_cells,
+                ),
+                timeout=_TIMEOUT_FIXING,
+            )
+
+            needed_fix = sum(1 for fc in fixed_candidates if fc.fix_iterations > 0)
+            fixed_ok = sum(
+                1 for fc in fixed_candidates
+                if fc.fix_iterations > 0
+                and fc.execution_result.success
+                and not fc.execution_result.is_empty
+            )
+            still_failing = sum(
+                1 for fc in fixed_candidates
+                if not fc.execution_result.success or fc.execution_result.is_empty
+            )
+
+            op8["needed_fix_count"] = needed_fix
+            op8["fixed_ok_count"] = fixed_ok
+            op8["still_failing_count"] = still_failing
+
+            # Per-candidate details
+            op8["candidates"] = [
+                {
+                    "generator_id": fc.generator_id,
+                    "original_sql": (fc.original_sql or "")[:500],
+                    "final_sql": (fc.final_sql or "")[:500],
+                    "fix_iterations": fc.fix_iterations,
+                    "error_type": (
+                        _categorize_error(fc.execution_result.error, fc.execution_result.is_empty)
+                        if fc.fix_iterations > 0 else None
+                    ),
+                    "confidence": round(fc.confidence_score, 4),
+                    "execution_success": fc.execution_result.success,
+                    "is_empty": fc.execution_result.is_empty,
+                    "row_count": (
+                        len(fc.execution_result.rows)
+                        if fc.execution_result.success
+                        else None
+                    ),
+                }
+                for fc in fixed_candidates
+            ]
+
+            # Oracle on post-fix candidates
+            if gold_exec.success:
+                post_correct = 0
+                for fc in fixed_candidates:
+                    if fc.execution_result.success and results_match(
+                        fc.execution_result.rows, gold_exec.rows
+                    ):
+                        post_correct += 1
+                        correct_post_fix_sqls.add(fc.final_sql)
+                op8["oracle_post_fix"] = post_correct > 0
+                op8["oracle_post_fix_count"] = post_correct
+                trace["oracle_post_fix"] = post_correct > 0
+                trace["oracle_post_fix_count"] = post_correct
+                logger.info(
+                    "  [Op8] needed_fix=%d, fixed_ok=%d, still_failing=%d | "
+                    "oracle_post=%d/%d",
+                    needed_fix, fixed_ok, still_failing,
+                    post_correct, len(fixed_candidates),
+                )
+
+        except asyncio.TimeoutError:
+            op8["error"] = f"timeout after {_TIMEOUT_FIXING}s"
+            if not trace["error_stage"]:
+                trace["error_stage"] = "op8_timeout"
+            logger.error("  [Op8] TIMEOUT after %ds", _TIMEOUT_FIXING)
+            fixed_candidates = []
+        except Exception as exc:
+            op8["error"] = f"{type(exc).__name__}: {exc}"
+            if not trace["error_stage"]:
+                trace["error_stage"] = "op8"
+            logger.error("  [Op8] FAILED: %s", exc)
+            logger.debug(traceback.format_exc())
+            fixed_candidates = []
+    else:
+        op8["error"] = "skipped — no candidates from Op7"
+        logger.warning("  [Op8] Skipped (no candidates)")
+
+    op8["duration_s"] = round(time.monotonic() - t0, 3)
+    trace["op8"] = op8
+
+    # ===================================================================
+    # Op 9: Adaptive Selection
+    # ===================================================================
+    t0 = time.monotonic()
+    op9: dict = {
+        "duration_s": 0.0,
+        "method": "error",
+        "cluster_count": 0,
+        "candidates_evaluated": 0,
+        "winner_sql": "",
+        "winner_generator": "",
+        "tournament_wins": {},
+        "selector_matched_oracle": False,
+        "error": None,
+    }
+
+    if fixed_candidates:
+        try:
+            selector = AdaptiveSelector()
+            selection = await asyncio.wait_for(
+                selector.select(
+                    candidates=fixed_candidates,
+                    question=question,
+                    evidence=evidence,
+                    schemas=linked_schemas,
+                    db_path=db_path,
+                ),
+                timeout=_TIMEOUT_SELECTION,
+            )
+
+            op9["method"] = selection.selection_method
+            op9["cluster_count"] = selection.cluster_count
+            op9["candidates_evaluated"] = selection.candidates_evaluated
+            op9["winner_sql"] = (selection.final_sql or "")[:500]
+            op9["tournament_wins"] = dict(selection.tournament_wins or {})
+
+            # Find which generator produced the winning SQL
+            winner_gen = ""
+            if selection.final_sql:
+                for fc in fixed_candidates:
+                    if fc.final_sql == selection.final_sql:
+                        winner_gen = fc.generator_id
+                        break
+            op9["winner_generator"] = winner_gen
+
+            # Check if selector picked an oracle-correct candidate
+            if correct_post_fix_sqls and selection.final_sql:
+                op9["selector_matched_oracle"] = (
+                    selection.final_sql in correct_post_fix_sqls
+                )
+                trace["selector_matched_oracle"] = op9["selector_matched_oracle"]
+
+            trace["predicted_sql"] = selection.final_sql or ""
+            trace["selection_method"] = selection.selection_method
+            trace["winner_generator"] = winner_gen
+            trace["cluster_count"] = selection.cluster_count
+
+            logger.info(
+                "  [Op9] method=%s clusters=%d winner=%s oracle_match=%s",
+                op9["method"], op9["cluster_count"],
+                op9["winner_generator"], op9["selector_matched_oracle"],
+            )
+
+        except asyncio.TimeoutError:
+            op9["error"] = f"timeout after {_TIMEOUT_SELECTION}s"
+            if not trace["error_stage"]:
+                trace["error_stage"] = "op9_timeout"
+            logger.error("  [Op9] TIMEOUT — using best-confidence fallback")
+            best = max(fixed_candidates, key=lambda fc: fc.confidence_score)
+            trace["predicted_sql"] = best.final_sql or ""
+            trace["selection_method"] = "fallback_timeout"
+        except Exception as exc:
+            op9["error"] = f"{type(exc).__name__}: {exc}"
+            if not trace["error_stage"]:
+                trace["error_stage"] = "op9"
+            logger.error("  [Op9] FAILED: %s", exc)
+            logger.debug(traceback.format_exc())
+            if fixed_candidates:
+                best = max(fixed_candidates, key=lambda fc: fc.confidence_score)
+                trace["predicted_sql"] = best.final_sql or ""
+                trace["selection_method"] = "fallback_exception"
+    else:
+        op9["error"] = "skipped — no fixed candidates"
+        logger.warning("  [Op9] Skipped (no fixed candidates)")
+
+    op9["duration_s"] = round(time.monotonic() - t0, 3)
+    trace["op9"] = op9
+
+    # ===================================================================
+    # Evaluation: compare predicted vs gold SQL
+    # ===================================================================
+    t_eval_start = time.monotonic()
+    final_sql = trace["predicted_sql"]
+    eval_info: dict = {
+        "predicted_sql": final_sql,
+        "truth_sql": gold_sql,
+        "correct": False,
+        "pred_success": False,
+        "truth_success": gold_exec.success,
+        "pred_row_count": None,
+        "truth_row_count": len(gold_exec.rows) if gold_exec.success else None,
+    }
+
+    if final_sql:
+        try:
+            pred_result = execute_sql(db_path, final_sql)
+            eval_info["pred_success"] = pred_result.success
+            if pred_result.success:
+                eval_info["pred_row_count"] = len(pred_result.rows)
+                if gold_exec.success:
+                    eval_info["correct"] = results_match(
+                        pred_result.rows, gold_exec.rows
+                    )
+        except Exception as exc:
+            logger.error("  [Eval] Execution failed: %s", exc)
+    else:
+        logger.warning("  [Eval] No SQL to evaluate")
+
+    trace["correct"] = eval_info["correct"]
+    trace["eval"] = eval_info
+
+    # Total latency
+    trace["latency_s"] = round(time.monotonic() - t_total_start, 3)
+
+    result_str = "✓ CORRECT" if trace["correct"] else "✗ WRONG"
+    logger.info(
+        "  → %s | oracle_pre=%s oracle_post=%s selector_match=%s | "
+        "latency=%.1fs | SQL: %.60s",
+        result_str,
+        trace["oracle_pre_fix"], trace["oracle_post_fix"],
+        trace["selector_matched_oracle"],
+        trace["latency_s"],
+        final_sql or "(none)",
+    )
+
+    return trace
+
+
 async def process_question(
     entry,
     artifacts: dict,
@@ -352,585 +937,15 @@ async def process_question(
     semaphore: asyncio.Semaphore,
 ) -> dict:
     """
-    Run the full pipeline (Ops 5–9) for one question with detailed tracing.
-
-    Returns a rich dict with both the compact result (for results.json) and
-    the detailed trace (for detailed_traces.json).
+    Acquire the concurrency semaphore then run ``_process_question_body``
+    with a safety-net timeout that starts *after* the semaphore is acquired,
+    so queue-wait time does not consume the budget.
     """
-    db_id = entry.db_id
-    question = entry.question
-    evidence = entry.evidence or ""
-    gold_sql = entry.SQL
-    db_path = artifacts["db_path"]
-
     async with semaphore:
-        t_total_start = time.monotonic()
-        logger.info(
-            "[%d/%d] Q#%d (%s/%s): %s",
-            question_idx + 1, total,
-            entry.question_id, db_id, entry.difficulty,
-            question[:80],
+        return await asyncio.wait_for(
+            _process_question_body(entry, artifacts, example_store, question_idx, total),
+            timeout=_TIMEOUT_TOTAL_SAFETY,
         )
-
-        # Shared state across stages
-        grounding_ctx: Optional[GroundingContext] = None
-        linked_schemas: Optional[LinkedSchemas] = None
-        all_candidates: list = []
-        fixed_candidates: list = []
-        correct_post_fix_sqls: set[str] = set()
-
-        # ---------------------------------------------------------------
-        # Execute gold SQL upfront (reused for oracle + eval)
-        # ---------------------------------------------------------------
-        gold_exec = execute_sql(db_path, gold_sql)
-        if not gold_exec.success:
-            logger.warning("  [Gold] Gold SQL failed: %s", gold_exec.error)
-
-        # ---------------------------------------------------------------
-        # Trace dict — populated incrementally
-        # ---------------------------------------------------------------
-        trace: dict = {
-            "question_id": entry.question_id,
-            "db_id": db_id,
-            "difficulty": entry.difficulty,
-            "question": question,
-            "evidence": evidence,
-            "truth_sql": gold_sql,
-            "gold_exec_success": gold_exec.success,
-            "gold_row_count": len(gold_exec.rows) if gold_exec.success else None,
-            # Compact result fields (filled in below)
-            "predicted_sql": "",
-            "correct": False,
-            "selection_method": "error",
-            "winner_generator": "",
-            "cluster_count": 0,
-            "latency_s": 0.0,
-            "error_stage": None,
-            # Oracle metrics
-            "oracle_pre_fix": False,
-            "oracle_pre_fix_count": 0,
-            "oracle_post_fix": False,
-            "oracle_post_fix_count": 0,
-            "oracle_total_candidates": 0,
-            "selector_matched_oracle": False,
-            # Per-op detailed traces (filled below)
-            "op5": {},
-            "op6": {},
-            "op7": {},
-            "op8": {},
-            "op9": {},
-            "eval": {},
-        }
-
-        # ===================================================================
-        # Op 5: Context Grounding
-        # ===================================================================
-        t0 = time.monotonic()
-        op5: dict = {
-            "duration_s": 0.0,
-            "cell_matches": [],
-            "cell_match_count": 0,
-            "schema_hints": [],
-            "schema_hint_count": 0,
-            "few_shot_count": 0,
-            "error": None,
-        }
-        try:
-            grounding_ctx = await asyncio.wait_for(
-                ground_context(
-                    question=question,
-                    evidence=evidence,
-                    db_id=db_id,
-                    lsh_index=artifacts["lsh_index"],
-                    example_store=example_store,
-                ),
-                timeout=_TIMEOUT_GROUNDING,
-            )
-            op5["cell_matches"] = [
-                {
-                    "table": cm.table,
-                    "column": cm.column,
-                    "value": cm.matched_value,
-                    "similarity": round(cm.similarity_score, 4),
-                }
-                for cm in grounding_ctx.matched_cells
-            ]
-            op5["cell_match_count"] = len(grounding_ctx.matched_cells)
-            op5["schema_hints"] = list(grounding_ctx.schema_hints)
-            op5["schema_hint_count"] = len(grounding_ctx.schema_hints)
-            op5["few_shot_count"] = len(grounding_ctx.few_shot_examples)
-            logger.info(
-                "  [Op5] cell_matches=%d, schema_hints=%d, few_shot=%d",
-                op5["cell_match_count"], op5["schema_hint_count"], op5["few_shot_count"],
-            )
-        except asyncio.TimeoutError:
-            op5["error"] = f"timeout after {_TIMEOUT_GROUNDING}s"
-            trace["error_stage"] = "op5_timeout"
-            logger.error("  [Op5] TIMEOUT after %ds", _TIMEOUT_GROUNDING)
-            grounding_ctx = GroundingContext()
-        except Exception as exc:
-            op5["error"] = f"{type(exc).__name__}: {exc}"
-            trace["error_stage"] = "op5"
-            logger.error("  [Op5] FAILED: %s", exc)
-            grounding_ctx = GroundingContext()
-        finally:
-            op5["duration_s"] = round(time.monotonic() - t0, 3)
-            trace["op5"] = op5
-
-        # ===================================================================
-        # Op 6: Adaptive Schema Linking
-        # ===================================================================
-        t0 = time.monotonic()
-        op6: dict = {
-            "duration_s": 0.0,
-            "s1_field_count": 0,
-            "s2_field_count": 0,
-            "s1_fields": [],
-            "s2_fields": [],
-            "schema_recall": {},
-            "error": None,
-        }
-        try:
-            linked_schemas = await asyncio.wait_for(
-                link_schema(
-                    question=question,
-                    evidence=evidence,
-                    grounding_context=grounding_ctx,
-                    faiss_index=artifacts["faiss_index"],
-                    full_ddl=artifacts["full_ddl"],
-                    full_markdown=artifacts["full_markdown"],
-                    available_fields=artifacts["available_fields"],
-                ),
-                timeout=_TIMEOUT_SCHEMA_LINKING,
-            )
-            op6["s1_field_count"] = len(linked_schemas.s1_fields)
-            op6["s2_field_count"] = len(linked_schemas.s2_fields)
-            op6["s1_fields"] = [
-                [str(f[0]), str(f[1])] for f in (linked_schemas.s1_fields or [])
-            ]
-            op6["s2_fields"] = [
-                [str(f[0]), str(f[1])] for f in (linked_schemas.s2_fields or [])
-            ]
-            op6["schema_recall"] = _compute_schema_recall(
-                linked_schemas.s1_ddl,
-                linked_schemas.s2_ddl,
-                linked_schemas.s1_fields,
-                linked_schemas.s2_fields,
-                gold_sql,
-            )
-            recall = op6["schema_recall"]
-            logger.info(
-                "  [Op6] s1=%d fields, s2=%d fields | "
-                "table_recall S1=%.0f%% S2=%.0f%% | col_recall S1=%.0f%% S2=%.0f%%",
-                op6["s1_field_count"], op6["s2_field_count"],
-                recall.get("table_recall_s1", 0) * 100,
-                recall.get("table_recall_s2", 0) * 100,
-                recall.get("col_recall_s1", 0) * 100,
-                recall.get("col_recall_s2", 0) * 100,
-            )
-        except asyncio.TimeoutError:
-            op6["error"] = f"timeout after {_TIMEOUT_SCHEMA_LINKING}s — using full DDL"
-            if not trace["error_stage"]:
-                trace["error_stage"] = "op6_timeout"
-            logger.error("  [Op6] TIMEOUT — falling back to full DDL")
-            linked_schemas = LinkedSchemas(
-                s1_ddl=artifacts["full_ddl"],
-                s1_markdown=artifacts["full_markdown"],
-                s2_ddl=artifacts["full_ddl"],
-                s2_markdown=artifacts["full_markdown"],
-                s1_fields=[],
-                s2_fields=[],
-                selection_reasoning="",
-            )
-            op6["schema_recall"] = _compute_schema_recall(
-                linked_schemas.s1_ddl, linked_schemas.s2_ddl,
-                [], [], gold_sql,
-            )
-        except Exception as exc:
-            op6["error"] = f"{type(exc).__name__}: {exc}"
-            if not trace["error_stage"]:
-                trace["error_stage"] = "op6"
-            logger.error("  [Op6] FAILED: %s", exc)
-            linked_schemas = LinkedSchemas(
-                s1_ddl=artifacts["full_ddl"],
-                s1_markdown=artifacts["full_markdown"],
-                s2_ddl=artifacts["full_ddl"],
-                s2_markdown=artifacts["full_markdown"],
-                s1_fields=[],
-                s2_fields=[],
-                selection_reasoning="",
-            )
-            op6["schema_recall"] = _compute_schema_recall(
-                linked_schemas.s1_ddl, linked_schemas.s2_ddl,
-                [], [], gold_sql,
-            )
-        finally:
-            op6["duration_s"] = round(time.monotonic() - t0, 3)
-            trace["op6"] = op6
-
-        # ===================================================================
-        # Op 7: Diverse SQL Generation (3 generators in parallel)
-        # ===================================================================
-        t0 = time.monotonic()
-        op7: dict = {
-            "duration_s": 0.0,
-            "total_candidates": 0,
-            "gen_reasoning_count": 0,
-            "gen_standard_b1_count": 0,
-            "gen_complex_b2_count": 0,
-            "gen_icl_count": 0,
-            "error_flag_count": 0,
-            "candidates": [],
-            "errors": None,
-        }
-        try:
-            reasoning_gen = ReasoningGenerator()
-            standard_gen = StandardAndComplexGenerator()
-            icl_gen = ICLGenerator()
-
-            gen_results = await asyncio.gather(
-                _run_gen_with_timeout(
-                    reasoning_gen.generate(
-                        question=question, evidence=evidence,
-                        schemas=linked_schemas, grounding=grounding_ctx,
-                    ),
-                    _TIMEOUT_GEN_REASONING, "reasoning",
-                ),
-                _run_gen_with_timeout(
-                    standard_gen.generate(
-                        question=question, evidence=evidence,
-                        schemas=linked_schemas, grounding=grounding_ctx,
-                    ),
-                    _TIMEOUT_GEN_STANDARD, "standard",
-                ),
-                _run_gen_with_timeout(
-                    icl_gen.generate(
-                        question=question, evidence=evidence,
-                        schemas=linked_schemas, grounding=grounding_ctx,
-                    ),
-                    _TIMEOUT_GEN_ICL, "icl",
-                ),
-                return_exceptions=True,
-            )
-
-            reasoning_cands = gen_results[0] if not isinstance(gen_results[0], Exception) else []
-            standard_cands = gen_results[1] if not isinstance(gen_results[1], Exception) else []
-            icl_cands = gen_results[2] if not isinstance(gen_results[2], Exception) else []
-
-            gen_errors = []
-            for name, res in [("reasoning", gen_results[0]), ("standard", gen_results[1]), ("icl", gen_results[2])]:
-                if isinstance(res, Exception):
-                    gen_errors.append(f"{name}: {type(res).__name__}: {res}")
-
-            all_candidates = list(reasoning_cands) + list(standard_cands) + list(icl_cands)
-
-            op7["gen_reasoning_count"] = len(reasoning_cands)
-            op7["gen_standard_b1_count"] = len(
-                [c for c in standard_cands if c.generator_id.startswith("standard")]
-            )
-            op7["gen_complex_b2_count"] = len(
-                [c for c in standard_cands if c.generator_id.startswith("complex")]
-            )
-            op7["gen_icl_count"] = len(icl_cands)
-            op7["total_candidates"] = len(all_candidates)
-            op7["error_flag_count"] = sum(1 for c in all_candidates if c.error_flag)
-            op7["candidates"] = [
-                {
-                    "generator_id": c.generator_id,
-                    "schema_used": c.schema_used,
-                    "schema_format": c.schema_format,
-                    "sql": c.sql[:500] if c.sql else "",  # truncate long SQL
-                    "error_flag": c.error_flag,
-                }
-                for c in all_candidates
-            ]
-            if gen_errors:
-                op7["errors"] = "; ".join(gen_errors)
-                if not trace["error_stage"]:
-                    trace["error_stage"] = "op7"
-
-            logger.info(
-                "  [Op7] total=%d (reasoning=%d, B1=%d, B2=%d, icl=%d) error_flags=%d",
-                op7["total_candidates"],
-                op7["gen_reasoning_count"],
-                op7["gen_standard_b1_count"],
-                op7["gen_complex_b2_count"],
-                op7["gen_icl_count"],
-                op7["error_flag_count"],
-            )
-
-            # Oracle on pre-fix candidates
-            trace["oracle_total_candidates"] = len(all_candidates)
-            if gold_exec.success and all_candidates:
-                pre_fix_correct = 0
-                for cand in all_candidates:
-                    if not cand.error_flag and cand.sql:
-                        cand_exec = execute_sql(db_path, cand.sql)
-                        if cand_exec.success and results_match(cand_exec.rows, gold_exec.rows):
-                            pre_fix_correct += 1
-                trace["oracle_pre_fix"] = pre_fix_correct > 0
-                trace["oracle_pre_fix_count"] = pre_fix_correct
-                logger.info("  [Oracle Pre-Fix] %d/%d correct", pre_fix_correct, len(all_candidates))
-
-        except Exception as exc:
-            op7["errors"] = f"{type(exc).__name__}: {exc}"
-            if not trace["error_stage"]:
-                trace["error_stage"] = "op7"
-            logger.error("  [Op7] FAILED: %s", exc)
-            logger.debug(traceback.format_exc())
-            all_candidates = []
-        finally:
-            op7["duration_s"] = round(time.monotonic() - t0, 3)
-            trace["op7"] = op7
-
-        # ===================================================================
-        # Op 8: Query Fixer
-        # ===================================================================
-        t0 = time.monotonic()
-        op8: dict = {
-            "duration_s": 0.0,
-            "total_candidates": len(all_candidates),
-            "needed_fix_count": 0,
-            "fixed_ok_count": 0,
-            "still_failing_count": 0,
-            "oracle_pre_fix": trace["oracle_pre_fix"],
-            "oracle_pre_fix_count": trace["oracle_pre_fix_count"],
-            "oracle_post_fix": False,
-            "oracle_post_fix_count": 0,
-            "candidates": [],
-            "error": None,
-        }
-
-        if all_candidates:
-            try:
-                fixer = QueryFixer()
-                fixed_candidates = await asyncio.wait_for(
-                    fixer.fix_candidates(
-                        candidates=all_candidates,
-                        question=question,
-                        evidence=evidence,
-                        schemas=linked_schemas,
-                        db_path=db_path,
-                        cell_matches=grounding_ctx.matched_cells,
-                    ),
-                    timeout=_TIMEOUT_FIXING,
-                )
-
-                needed_fix = sum(1 for fc in fixed_candidates if fc.fix_iterations > 0)
-                fixed_ok = sum(
-                    1 for fc in fixed_candidates
-                    if fc.fix_iterations > 0
-                    and fc.execution_result.success
-                    and not fc.execution_result.is_empty
-                )
-                still_failing = sum(
-                    1 for fc in fixed_candidates
-                    if not fc.execution_result.success or fc.execution_result.is_empty
-                )
-
-                op8["needed_fix_count"] = needed_fix
-                op8["fixed_ok_count"] = fixed_ok
-                op8["still_failing_count"] = still_failing
-
-                # Per-candidate details
-                op8["candidates"] = [
-                    {
-                        "generator_id": fc.generator_id,
-                        "original_sql": (fc.original_sql or "")[:500],
-                        "final_sql": (fc.final_sql or "")[:500],
-                        "fix_iterations": fc.fix_iterations,
-                        "error_type": (
-                            _categorize_error(fc.execution_result.error, fc.execution_result.is_empty)
-                            if fc.fix_iterations > 0 else None
-                        ),
-                        "confidence": round(fc.confidence_score, 4),
-                        "execution_success": fc.execution_result.success,
-                        "is_empty": fc.execution_result.is_empty,
-                        "row_count": (
-                            len(fc.execution_result.rows)
-                            if fc.execution_result.success
-                            else None
-                        ),
-                    }
-                    for fc in fixed_candidates
-                ]
-
-                # Oracle on post-fix candidates
-                if gold_exec.success:
-                    post_correct = 0
-                    for fc in fixed_candidates:
-                        if fc.execution_result.success and results_match(
-                            fc.execution_result.rows, gold_exec.rows
-                        ):
-                            post_correct += 1
-                            correct_post_fix_sqls.add(fc.final_sql)
-                    op8["oracle_post_fix"] = post_correct > 0
-                    op8["oracle_post_fix_count"] = post_correct
-                    trace["oracle_post_fix"] = post_correct > 0
-                    trace["oracle_post_fix_count"] = post_correct
-                    logger.info(
-                        "  [Op8] needed_fix=%d, fixed_ok=%d, still_failing=%d | "
-                        "oracle_post=%d/%d",
-                        needed_fix, fixed_ok, still_failing,
-                        post_correct, len(fixed_candidates),
-                    )
-
-            except asyncio.TimeoutError:
-                op8["error"] = f"timeout after {_TIMEOUT_FIXING}s"
-                if not trace["error_stage"]:
-                    trace["error_stage"] = "op8_timeout"
-                logger.error("  [Op8] TIMEOUT after %ds", _TIMEOUT_FIXING)
-                fixed_candidates = []
-            except Exception as exc:
-                op8["error"] = f"{type(exc).__name__}: {exc}"
-                if not trace["error_stage"]:
-                    trace["error_stage"] = "op8"
-                logger.error("  [Op8] FAILED: %s", exc)
-                logger.debug(traceback.format_exc())
-                fixed_candidates = []
-        else:
-            op8["error"] = "skipped — no candidates from Op7"
-            logger.warning("  [Op8] Skipped (no candidates)")
-
-        op8["duration_s"] = round(time.monotonic() - t0, 3)
-        trace["op8"] = op8
-
-        # ===================================================================
-        # Op 9: Adaptive Selection
-        # ===================================================================
-        t0 = time.monotonic()
-        op9: dict = {
-            "duration_s": 0.0,
-            "method": "error",
-            "cluster_count": 0,
-            "candidates_evaluated": 0,
-            "winner_sql": "",
-            "winner_generator": "",
-            "tournament_wins": {},
-            "selector_matched_oracle": False,
-            "error": None,
-        }
-
-        if fixed_candidates:
-            try:
-                selector = AdaptiveSelector()
-                selection = await asyncio.wait_for(
-                    selector.select(
-                        candidates=fixed_candidates,
-                        question=question,
-                        evidence=evidence,
-                        schemas=linked_schemas,
-                        db_path=db_path,
-                    ),
-                    timeout=_TIMEOUT_SELECTION,
-                )
-
-                op9["method"] = selection.selection_method
-                op9["cluster_count"] = selection.cluster_count
-                op9["candidates_evaluated"] = selection.candidates_evaluated
-                op9["winner_sql"] = (selection.final_sql or "")[:500]
-                op9["tournament_wins"] = dict(selection.tournament_wins or {})
-
-                # Find which generator produced the winning SQL
-                winner_gen = ""
-                if selection.final_sql:
-                    for fc in fixed_candidates:
-                        if fc.final_sql == selection.final_sql:
-                            winner_gen = fc.generator_id
-                            break
-                op9["winner_generator"] = winner_gen
-
-                # Check if selector picked an oracle-correct candidate
-                if correct_post_fix_sqls and selection.final_sql:
-                    op9["selector_matched_oracle"] = (
-                        selection.final_sql in correct_post_fix_sqls
-                    )
-                    trace["selector_matched_oracle"] = op9["selector_matched_oracle"]
-
-                trace["predicted_sql"] = selection.final_sql or ""
-                trace["selection_method"] = selection.selection_method
-                trace["winner_generator"] = winner_gen
-                trace["cluster_count"] = selection.cluster_count
-
-                logger.info(
-                    "  [Op9] method=%s clusters=%d winner=%s oracle_match=%s",
-                    op9["method"], op9["cluster_count"],
-                    op9["winner_generator"], op9["selector_matched_oracle"],
-                )
-
-            except asyncio.TimeoutError:
-                op9["error"] = f"timeout after {_TIMEOUT_SELECTION}s"
-                if not trace["error_stage"]:
-                    trace["error_stage"] = "op9_timeout"
-                logger.error("  [Op9] TIMEOUT — using best-confidence fallback")
-                best = max(fixed_candidates, key=lambda fc: fc.confidence_score)
-                trace["predicted_sql"] = best.final_sql or ""
-                trace["selection_method"] = "fallback_timeout"
-            except Exception as exc:
-                op9["error"] = f"{type(exc).__name__}: {exc}"
-                if not trace["error_stage"]:
-                    trace["error_stage"] = "op9"
-                logger.error("  [Op9] FAILED: %s", exc)
-                logger.debug(traceback.format_exc())
-                if fixed_candidates:
-                    best = max(fixed_candidates, key=lambda fc: fc.confidence_score)
-                    trace["predicted_sql"] = best.final_sql or ""
-                    trace["selection_method"] = "fallback_exception"
-        else:
-            op9["error"] = "skipped — no fixed candidates"
-            logger.warning("  [Op9] Skipped (no fixed candidates)")
-
-        op9["duration_s"] = round(time.monotonic() - t0, 3)
-        trace["op9"] = op9
-
-        # ===================================================================
-        # Evaluation: compare predicted vs gold SQL
-        # ===================================================================
-        t_eval_start = time.monotonic()
-        final_sql = trace["predicted_sql"]
-        eval_info: dict = {
-            "predicted_sql": final_sql,
-            "truth_sql": gold_sql,
-            "correct": False,
-            "pred_success": False,
-            "truth_success": gold_exec.success,
-            "pred_row_count": None,
-            "truth_row_count": len(gold_exec.rows) if gold_exec.success else None,
-        }
-
-        if final_sql:
-            try:
-                pred_result = execute_sql(db_path, final_sql)
-                eval_info["pred_success"] = pred_result.success
-                if pred_result.success:
-                    eval_info["pred_row_count"] = len(pred_result.rows)
-                    if gold_exec.success:
-                        eval_info["correct"] = results_match(
-                            pred_result.rows, gold_exec.rows
-                        )
-            except Exception as exc:
-                logger.error("  [Eval] Execution failed: %s", exc)
-        else:
-            logger.warning("  [Eval] No SQL to evaluate")
-
-        trace["correct"] = eval_info["correct"]
-        trace["eval"] = eval_info
-
-        # Total latency
-        trace["latency_s"] = round(time.monotonic() - t_total_start, 3)
-
-        result_str = "✓ CORRECT" if trace["correct"] else "✗ WRONG"
-        logger.info(
-            "  → %s | oracle_pre=%s oracle_post=%s selector_match=%s | "
-            "latency=%.1fs | SQL: %.60s",
-            result_str,
-            trace["oracle_pre_fix"], trace["oracle_post_fix"],
-            trace["selector_matched_oracle"],
-            trace["latency_s"],
-            final_sql or "(none)",
-        )
-
-        return trace
 
 
 # ---------------------------------------------------------------------------
@@ -1258,12 +1273,9 @@ async def main(args: argparse.Namespace) -> None:
             continue
 
         tasks.append(
-            asyncio.wait_for(
-                process_question(
-                    entry, artifacts, example_store,
-                    idx, len(sampled), semaphore,
-                ),
-                timeout=_TIMEOUT_TOTAL_SAFETY,
+            process_question(
+                entry, artifacts, example_store,
+                idx, len(sampled), semaphore,
             )
         )
 
