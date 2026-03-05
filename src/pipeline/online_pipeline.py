@@ -30,10 +30,11 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
-from src.grounding.context_grounder import ground_context
-from src.schema_linking.schema_linker import link_schema
+from src.config.settings import settings
+from src.grounding.context_grounder import ground_context, GroundingContext
+from src.schema_linking.schema_linker import link_schema, LinkedSchemas
 from src.generation.reasoning_generator import ReasoningGenerator
 from src.generation.standard_generator import StandardAndComplexGenerator
 from src.generation.icl_generator import ICLGenerator
@@ -59,14 +60,13 @@ PIPELINE_SEMAPHORE: asyncio.Semaphore = asyncio.Semaphore(10)
 # ---------------------------------------------------------------------------
 
 #: Maximum seconds to wait for a single Op 7 generator.
-#: Extended thinking on complex schemas can take 60–90 s; 120 s is generous
-#: but still prevents a single hung generator from blocking the pipeline.
-GENERATOR_TIMEOUT_S: int = 120
+#: Configurable via GENERATOR_TIMEOUT_S env var (default 600).
+#: Increase for slow local providers (e.g. MLX) where all calls are serialized.
+GENERATOR_TIMEOUT_S: int = settings.generator_timeout_s
 
-#: Soft per-question deadline in seconds.  The whole answer_question() body
-#: is wrapped with this limit.  If it fires, a graceful fallback PipelineResult
-#: is returned.  Must be well below the external safety-net (typically 1560 s).
-QUESTION_SOFT_TIMEOUT_S: int = 300
+#: Soft per-question deadline in seconds.
+#: Configurable via QUESTION_SOFT_TIMEOUT_S env var (default 3600).
+QUESTION_SOFT_TIMEOUT_S: int = settings.question_soft_timeout_s
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +82,22 @@ class PipelineResult:
     candidates_evaluated: int
     generator_wins: dict        # generator_id → win count (from tournament)
     total_cost_estimate: float  # best-effort cost estimate (always 0.0 for now)
+
+
+@dataclass
+class QuestionContext:
+    """
+    Intermediate state produced by Phase 1 (Op5+6, index-heavy).
+
+    Contains all data needed to run Phase 2 (Op7-9, LLM-only).
+    Once a QuestionContext has been produced for every question in a
+    database batch, the caller may free the heavy index objects
+    (lsh_index, faiss_index, example_store) before starting Phase 2.
+    """
+    entry: "BirdEntry"
+    db_path: str
+    grounding: GroundingContext
+    schemas: LinkedSchemas
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +138,7 @@ async def answer_question(
     """
     try:
         return await asyncio.wait_for(
-            _answer_question_inner(entry, artifacts, db_path),
+            _run_full_pipeline(entry, artifacts, db_path),
             timeout=QUESTION_SOFT_TIMEOUT_S,
         )
     except asyncio.TimeoutError:
@@ -142,12 +158,75 @@ async def answer_question(
         )
 
 
-async def _answer_question_inner(
+async def _run_full_pipeline(
     entry: "BirdEntry",
     artifacts: "OfflineArtifacts",
     db_path: str,
 ) -> PipelineResult:
-    """Inner implementation of answer_question (wrapped by soft timeout)."""
+    """Convenience wrapper: Phase 1 then Phase 2 sequentially (no timeout)."""
+    ctx = await _prepare_context_inner(entry, artifacts, db_path)
+    return await _answer_from_context_inner(ctx)
+
+
+async def prepare_context(
+    entry: "BirdEntry",
+    artifacts: "OfflineArtifacts",
+    db_path: str,
+) -> Optional[QuestionContext]:
+    """
+    Phase 1 — Op5 (context grounding) + Op6 (schema linking).
+
+    Uses the heavy index objects (lsh_index, faiss_index, example_store).
+    Returns a QuestionContext with all data needed by Phase 2 (Op7-9).
+    Returns None if an unrecoverable error occurs (caller should treat as skip).
+
+    Once this returns successfully for all questions in a database batch,
+    the caller may free lsh_index, faiss_index, and example_store before
+    calling answer_from_context — they are not accessed again.
+    """
+    try:
+        return await _prepare_context_inner(entry, artifacts, db_path)
+    except Exception as exc:
+        logger.error(
+            "[%s] prepare_context failed for Q#%d: %s",
+            entry.db_id, entry.question_id, exc,
+        )
+        return None
+
+
+async def answer_from_context(ctx: QuestionContext) -> PipelineResult:
+    """
+    Phase 2 — Op7 (generation) + Op8 (fixing) + Op9 (selection).
+
+    Requires no artifact index access — only ctx.grounding, ctx.schemas,
+    ctx.entry, and ctx.db_path.  Safe to call after indexes are freed.
+    """
+    try:
+        return await asyncio.wait_for(
+            _answer_from_context_inner(ctx),
+            timeout=QUESTION_SOFT_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "[%s] answer_from_context() exceeded soft timeout of %ds",
+            ctx.entry.db_id, QUESTION_SOFT_TIMEOUT_S,
+        )
+        return PipelineResult(
+            final_sql="",
+            selection_method="timeout_fallback",
+            cluster_count=0,
+            candidates_evaluated=0,
+            generator_wins={},
+            total_cost_estimate=0.0,
+        )
+
+
+async def _prepare_context_inner(
+    entry: "BirdEntry",
+    artifacts: "OfflineArtifacts",
+    db_path: str,
+) -> QuestionContext:
+    """Op5+6 implementation (no timeout wrapper)."""
     question = entry.question
     evidence = entry.evidence or ""
     db_id = entry.db_id
@@ -204,6 +283,24 @@ async def _answer_question_inner(
         len(schemas.s1_fields),
         len(schemas.s2_fields),
     )
+
+    return QuestionContext(
+        entry=entry,
+        db_path=db_path,
+        grounding=grounding,
+        schemas=schemas,
+    )
+
+
+async def _answer_from_context_inner(ctx: QuestionContext) -> PipelineResult:
+    """Op7+8+9 implementation (no timeout wrapper). No artifact access."""
+    entry = ctx.entry
+    question = entry.question
+    evidence = entry.evidence or ""
+    db_id = entry.db_id
+    grounding = ctx.grounding
+    schemas = ctx.schemas
+    db_path = ctx.db_path
 
     # -----------------------------------------------------------------------
     # Op 7: Diverse SQL Generation (3 generators run in parallel)

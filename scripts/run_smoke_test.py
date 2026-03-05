@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import gc
 import json
 import logging
 import os
@@ -80,20 +81,40 @@ from src.fixing.query_fixer import QueryFixer, _categorize_error
 from src.selection.adaptive_selector import AdaptiveSelector
 
 # ---------------------------------------------------------------------------
-# Per-stage timeouts (same as checkpoint_e_test.py, battle-tested values)
+# Per-stage timeouts — raised to 600 s to accommodate a local MLX 14B model,
+# which can take 4–8 min per stage on complex schemas.
 # ---------------------------------------------------------------------------
-_TIMEOUT_GROUNDING = 300
-_TIMEOUT_SCHEMA_LINKING = 300
-_TIMEOUT_GEN_REASONING = 300
-_TIMEOUT_GEN_STANDARD = 300
-_TIMEOUT_GEN_ICL = 300
-_TIMEOUT_FIXING = 300
-_TIMEOUT_SELECTION = 300
+_TIMEOUT_GROUNDING = 600
+_TIMEOUT_SCHEMA_LINKING = 1800
+_TIMEOUT_GEN_REASONING = 600
+_TIMEOUT_GEN_STANDARD = 600
+_TIMEOUT_GEN_ICL = 600
+_TIMEOUT_FIXING = 600
+_TIMEOUT_SELECTION = 600
 _TIMEOUT_TOTAL_SAFETY = (
     _TIMEOUT_GROUNDING + _TIMEOUT_SCHEMA_LINKING
     + max(_TIMEOUT_GEN_REASONING, _TIMEOUT_GEN_STANDARD, _TIMEOUT_GEN_ICL)
     + _TIMEOUT_FIXING + _TIMEOUT_SELECTION + 60
 )
+
+
+async def _check_mlx_server() -> bool:
+    """Return True if the local MLX server (or any non-MLX provider) is reachable.
+
+    Only meaningful when LLM_PROVIDER=mlx.  Performs a quick GET /v1/models with
+    a 3-second connect timeout so it fails fast.
+    """
+    if settings.llm_provider != "mlx":
+        return True
+    import httpx as _httpx  # already installed as a dependency of openai
+    url = f"{settings.mlx_server_url.rstrip('/')}/v1/models"
+    try:
+        async with _httpx.AsyncClient(timeout=3.0) as client:
+            await client.get(url)
+        return True
+    except Exception:
+        return False
+
 
 # BIRD dev dataset directories
 _DEV_DATABASES = _REPO_ROOT / "data" / "bird" / "dev" / "dev_databases"
@@ -468,6 +489,12 @@ async def _process_question_body(
         trace["error_stage"] = "op5"
         logger.error("  [Op5] FAILED: %s", exc)
         grounding_ctx = GroundingContext()
+        if not await _check_mlx_server():
+            logger.critical(
+                "MLX server at %s is unreachable — restart it then re-run with --resume.",
+                settings.mlx_server_url,
+            )
+            raise SystemExit(1)
     finally:
         op5["duration_s"] = round(time.monotonic() - t0, 3)
         trace["op5"] = op5
@@ -559,6 +586,12 @@ async def _process_question_body(
             linked_schemas.s1_ddl, linked_schemas.s2_ddl,
             [], [], gold_sql,
         )
+        if not await _check_mlx_server():
+            logger.critical(
+                "MLX server at %s is unreachable — restart it then re-run with --resume.",
+                settings.mlx_server_url,
+            )
+            raise SystemExit(1)
     finally:
         op6["duration_s"] = round(time.monotonic() - t0, 3)
         trace["op6"] = op6
@@ -1192,24 +1225,6 @@ async def main(args: argparse.Namespace) -> None:
     logger.info("ExampleStore loaded (%d entries)", len(example_store._metadata))
 
     # -----------------------------------------------------------------------
-    # Pre-load per-DB artifacts
-    # -----------------------------------------------------------------------
-    db_ids_needed = sorted(set(e.db_id for e in sampled))
-    logger.info("Loading artifacts for %d databases …", len(db_ids_needed))
-    db_artifacts: dict[str, Optional[dict]] = {}
-    for db_id in db_ids_needed:
-        try:
-            db_artifacts[db_id] = load_artifacts(db_id)
-            logger.info(
-                "  [%s] loaded (FAISS: %d fields, LSH ready)",
-                db_id,
-                len(db_artifacts[db_id]["faiss_index"]._fields),
-            )
-        except Exception as exc:
-            logger.error("  [%s] FAILED to load artifacts: %s", db_id, exc)
-            db_artifacts[db_id] = None
-
-    # -----------------------------------------------------------------------
     # Resume: load already-completed results
     # -----------------------------------------------------------------------
     results_path = output_dir / "results.json"
@@ -1230,77 +1245,104 @@ async def main(args: argparse.Namespace) -> None:
     logger.info("Processing %d questions …", len(pending))
 
     # -----------------------------------------------------------------------
-    # Process questions concurrently (limited by --workers semaphore)
+    # Process questions one database at a time — load artifacts, run all
+    # questions for that DB concurrently, then free memory before next DB.
     # -----------------------------------------------------------------------
     semaphore = asyncio.Semaphore(args.workers)
-    tasks = []
-    for idx, entry in enumerate(sampled):
-        if entry.question_id in done_ids:
-            continue
-        artifacts = db_artifacts.get(entry.db_id)
-        if artifacts is None:
-            # Create an error placeholder
-            completed_traces.append({
-                "question_id": entry.question_id,
-                "db_id": entry.db_id,
-                "difficulty": entry.difficulty,
-                "question": entry.question,
-                "evidence": entry.evidence,
-                "truth_sql": entry.SQL,
-                "predicted_sql": "",
-                "correct": False,
-                "selection_method": "error",
-                "winner_generator": "",
-                "cluster_count": 0,
-                "latency_s": 0.0,
-                "error_stage": "artifacts_not_loaded",
-                "oracle_pre_fix": False,
-                "oracle_pre_fix_count": 0,
-                "oracle_post_fix": False,
-                "oracle_post_fix_count": 0,
-                "oracle_total_candidates": 0,
-                "selector_matched_oracle": False,
-                "gold_exec_success": False,
-                "gold_row_count": None,
-                "op5": {"error": "artifacts not loaded"},
-                "op6": {"error": "artifacts not loaded"},
-                "op7": {"error": "artifacts not loaded"},
-                "op8": {"error": "artifacts not loaded"},
-                "op9": {"error": "artifacts not loaded"},
-                "eval": {},
-            })
-            completed_results.append(_trace_to_result(completed_traces[-1]))
-            continue
 
-        tasks.append(
-            process_question(
-                entry, artifacts, example_store,
-                idx, len(sampled), semaphore,
-            )
-        )
+    # Precompute the original sampled index per question_id (used by
+    # process_question for progress display).
+    sampled_idx: dict[int, int] = {e.question_id: i for i, e in enumerate(sampled)}
 
-    # Run all tasks, saving results incrementally
-    for coro in asyncio.as_completed(tasks):
-        try:
-            trace = await coro
-        except asyncio.TimeoutError:
-            logger.error("Question hit safety-net timeout of %ds", _TIMEOUT_TOTAL_SAFETY)
-            continue
-        except Exception as exc:
-            logger.error("Unexpected error processing question: %s", exc)
-            logger.debug(traceback.format_exc())
-            continue
+    # Group pending questions by db_id
+    pending_by_db: dict[str, list] = {}
+    for entry in pending:
+        pending_by_db.setdefault(entry.db_id, []).append(entry)
 
-        completed_traces.append(trace)
-        completed_results.append(_trace_to_result(trace))
-
-        # Save incrementally after every question
+    def _save_incremental() -> None:
         with open(traces_path, "w", encoding="utf-8") as f:
             json.dump(completed_traces, f, ensure_ascii=False, indent=2)
         with open(results_path, "w", encoding="utf-8") as f:
             json.dump(completed_results, f, ensure_ascii=False, indent=2)
 
-        print_running_summary(completed_results)
+    for db_id in sorted(pending_by_db.keys()):
+        db_questions = pending_by_db[db_id]
+
+        # Load artifacts for this DB only
+        logger.info("  [%s] Loading artifacts for %d question(s) …", db_id, len(db_questions))
+        try:
+            artifacts = load_artifacts(db_id)
+            logger.info(
+                "  [%s] artifacts loaded (FAISS: %d fields, LSH ready)",
+                db_id,
+                len(artifacts["faiss_index"]._fields),
+            )
+        except Exception as exc:
+            logger.error("  [%s] FAILED to load artifacts: %s — skipping %d question(s)", db_id, exc, len(db_questions))
+            for entry in db_questions:
+                completed_traces.append({
+                    "question_id": entry.question_id,
+                    "db_id": entry.db_id,
+                    "difficulty": entry.difficulty,
+                    "question": entry.question,
+                    "evidence": entry.evidence,
+                    "truth_sql": entry.SQL,
+                    "predicted_sql": "",
+                    "correct": False,
+                    "selection_method": "error",
+                    "winner_generator": "",
+                    "cluster_count": 0,
+                    "latency_s": 0.0,
+                    "error_stage": "artifacts_not_loaded",
+                    "oracle_pre_fix": False,
+                    "oracle_pre_fix_count": 0,
+                    "oracle_post_fix": False,
+                    "oracle_post_fix_count": 0,
+                    "oracle_total_candidates": 0,
+                    "selector_matched_oracle": False,
+                    "gold_exec_success": False,
+                    "gold_row_count": None,
+                    "op5": {"error": "artifacts not loaded"},
+                    "op6": {"error": "artifacts not loaded"},
+                    "op7": {"error": "artifacts not loaded"},
+                    "op8": {"error": "artifacts not loaded"},
+                    "op9": {"error": "artifacts not loaded"},
+                    "eval": {},
+                })
+                completed_results.append(_trace_to_result(completed_traces[-1]))
+            _save_incremental()
+            continue
+
+        # Build tasks for this DB's pending questions only
+        db_tasks = [
+            process_question(
+                entry, artifacts, example_store,
+                sampled_idx[entry.question_id], len(sampled), semaphore,
+            )
+            for entry in db_questions
+        ]
+
+        # Drain this DB's questions with full async concurrency
+        for coro in asyncio.as_completed(db_tasks):
+            try:
+                trace = await coro
+            except asyncio.TimeoutError:
+                logger.error("Question hit safety-net timeout of %ds", _TIMEOUT_TOTAL_SAFETY)
+                continue
+            except Exception as exc:
+                logger.error("Unexpected error processing question: %s", exc)
+                logger.debug(traceback.format_exc())
+                continue
+
+            completed_traces.append(trace)
+            completed_results.append(_trace_to_result(trace))
+            _save_incremental()
+            print_running_summary(completed_results)
+
+        # Free this DB's artifacts before loading the next one
+        del artifacts
+        gc.collect()
+        logger.info("  [%s] Done. Memory released.", db_id)
 
     print()  # newline after progress indicator
 
