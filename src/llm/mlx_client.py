@@ -24,6 +24,7 @@ Requires the [mlx] optional dependency group:
     pip install -e ".[mlx]"
 """
 
+import asyncio
 import logging
 from typing import Any, Optional
 
@@ -154,6 +155,11 @@ def _is_rate_limit(exc: Exception) -> bool:
 
     mlx_lm.server is single-process and returns HTTP 503 when busy.
     We treat 503 the same as 429 so the base class fallback logic fires.
+
+    ConnectError is also treated as transient: the local MLX server can drop
+    briefly during model loading or after a large generation.  Classifying it
+    as a rate-limit-style error makes tenacity back off (2–30 s) instead of
+    hammering the server immediately.
     """
     try:
         from openai import APIStatusError, RateLimitError  # type: ignore[import]
@@ -163,8 +169,29 @@ def _is_rate_limit(exc: Exception) -> bool:
             return True
     except ImportError:
         pass
+    try:
+        if isinstance(exc, httpx.ConnectError):
+            return True
+    except Exception:
+        pass
     msg = str(exc).lower()
-    return "429" in msg or "503" in msg or "rate limit" in msg or "too many requests" in msg
+    return (
+        "429" in msg or "503" in msg or "rate limit" in msg
+        or "too many requests" in msg
+        or "all connection attempts failed" in msg
+        or "connection error" in msg
+    )
+
+
+# ---------------------------------------------------------------------------
+# Global serialisation gate for the local MLX server
+# ---------------------------------------------------------------------------
+
+# mlx_lm.server is single-process: concurrent requests cause 503 errors and
+# wasted context-switching.  This semaphore ensures only ONE prompt is in
+# flight to the server at any time, regardless of how many concurrent pipeline
+# questions are running.
+_MLX_SEMAPHORE = asyncio.Semaphore(1)
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +236,10 @@ class MLXClient(LLMClient):
         self._raw_client = AsyncOpenAI(
             base_url=v1_url,
             api_key="local",  # mlx_lm.server ignores the API key
-            timeout=httpx.Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0),
+            # read=None: let asyncio wait_for (per-stage) be the sole deadline.
+            # A fixed httpx read timeout shorter than the stage timeout causes
+            # instructor to retry (3× the timeout) before asyncio can cancel cleanly.
+            timeout=httpx.Timeout(connect=10.0, read=None, write=30.0, pool=10.0),
         )
         # instructor patches the client in-place; both references share state.
         self._client = instructor.from_openai(
@@ -237,15 +267,47 @@ class MLXClient(LLMClient):
         max_tokens: int = 2000,
         temperature: float = 1.0,
     ) -> LLMResponse:
-        # ThinkingConfig is not supported for local models — log and ignore.
-        if thinking and thinking.enabled:
-            logger.debug(
-                "MLXClient: ThinkingConfig(enabled=True) is not supported for "
-                "local MLX models and will be ignored."
+        # Serialise all calls: the local MLX server is single-process and
+        # cannot handle concurrent requests without 503 errors.
+        async with _MLX_SEMAPHORE:
+            return await self._generate_single_locked(
+                model=model,
+                system=system,
+                messages=messages,
+                tools=tools,
+                tool_choice_name=tool_choice_name,
+                thinking=thinking,
+                max_tokens=max_tokens,
+                temperature=temperature,
             )
 
+    async def _generate_single_locked(
+        self,
+        *,
+        model: str,
+        system: list[CacheableText],
+        messages: list[dict[str, Any]],
+        tools: list[ToolParam],
+        tool_choice_name: Optional[str] = None,
+        thinking: Optional[ThinkingConfig] = None,
+        max_tokens: int = 2000,
+        temperature: float = 1.0,
+    ) -> LLMResponse:
         # CacheableText.cache hints are ignored; text content is still used.
         system_text = "\n\n".join(block.text for block in system)
+
+        # Qwen3 thinking-mode control via /no_think / /think prefix.
+        # Qwen3 generates <think>…</think> blocks by default, which adds hundreds
+        # to thousands of tokens (and minutes of latency) before the JSON answer.
+        # Prepend /no_think to disable it for every call except those that
+        # explicitly request extended thinking (Generator A).
+        # For Generator A (thinking.enabled=True) we prepend /think instead so
+        # the model reasons before answering complex SQL generation tasks.
+        if thinking and thinking.enabled:
+            prefix = "/think"
+        else:
+            prefix = "/no_think"
+        system_text = f"{prefix}\n\n{system_text}" if system_text else prefix
 
         full_messages: list[dict[str, Any]] = []
         if system_text:

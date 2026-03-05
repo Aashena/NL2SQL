@@ -26,6 +26,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ctypes
+import ctypes.util
+import gc
 import json
 import logging
 import os
@@ -67,8 +70,42 @@ from src.data.database import execute_sql, ExecutionResult
 from src.indexing.faiss_index import FAISSIndex
 from src.indexing.lsh_index import LSHIndex
 from src.indexing.example_store import ExampleStore
-from src.pipeline.online_pipeline import answer_question, PipelineResult, PIPELINE_SEMAPHORE
+from src.monitoring.fallback_tracker import get_tracker
+from src.pipeline.online_pipeline import (
+    answer_question,
+    prepare_context,
+    answer_from_context,
+    QuestionContext,
+    PipelineResult,
+    PIPELINE_SEMAPHORE,
+)
 from src.preprocessing.schema_formatter import FormattedSchemas
+
+# ---------------------------------------------------------------------------
+# Memory return helper — encourages the OS allocator to reclaim freed pages.
+# On Linux: calls malloc_trim(0). On macOS: calls malloc_zone_pressure_relief.
+# Best-effort: silently ignored if the call fails.
+# ---------------------------------------------------------------------------
+
+def _malloc_trim() -> None:
+    """Ask the C allocator to return freed memory pages to the OS."""
+    try:
+        import sys
+        if sys.platform == "darwin":
+            libc = ctypes.CDLL("libc.dylib", use_errno=True)
+            # malloc_zone_pressure_relief(zone=NULL, goal=0) → release all zones
+            fn = libc.malloc_zone_pressure_relief
+            fn.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+            fn.restype = ctypes.c_size_t
+            fn(None, 0)
+        else:
+            # Linux / glibc
+            libc_name = ctypes.util.find_library("c") or "libc.so.6"
+            libc = ctypes.CDLL(libc_name, use_errno=True)
+            libc.malloc_trim(ctypes.c_size_t(0))
+    except Exception:
+        pass  # non-critical — just best-effort
+
 
 try:
     from tqdm import tqdm
@@ -296,6 +333,68 @@ async def _evaluate_one(
     )
 
 
+async def _evaluate_one_from_context(
+    ctx: QuestionContext,
+    semaphore: asyncio.Semaphore,
+) -> EvaluationEntry:
+    """Phase 2 evaluation: Op7-9 from a pre-built QuestionContext (no artifact access)."""
+    t0 = time.monotonic()
+    entry = ctx.entry
+
+    async with semaphore:
+        try:
+            result: PipelineResult = await answer_from_context(ctx)
+        except Exception as exc:
+            logger.error(
+                "answer_from_context failed for question_id=%d (%s): %s",
+                entry.question_id,
+                entry.db_id,
+                exc,
+                exc_info=True,
+            )
+            return EvaluationEntry(
+                question_id=entry.question_id,
+                db_id=entry.db_id,
+                difficulty=entry.difficulty,
+                predicted_sql="",
+                truth_sql=entry.SQL,
+                correct=False,
+                selection_method="error",
+                winner_generator="",
+                cluster_count=0,
+                latency_seconds=time.monotonic() - t0,
+            )
+
+    latency = time.monotonic() - t0
+    predicted_sql = result.final_sql
+    truth_sql = entry.SQL
+
+    pred_result: ExecutionResult = execute_sql(ctx.db_path, predicted_sql)
+    gold_result: ExecutionResult = execute_sql(ctx.db_path, truth_sql)
+
+    if pred_result.success and gold_result.success:
+        correct = _results_match(pred_result.rows, gold_result.rows)
+    else:
+        correct = False
+
+    winner_gen = "fallback"
+    if result.generator_wins:
+        winner_gen = max(result.generator_wins, key=lambda g: result.generator_wins[g])
+
+    return EvaluationEntry(
+        question_id=entry.question_id,
+        db_id=entry.db_id,
+        difficulty=entry.difficulty,
+        predicted_sql=predicted_sql,
+        truth_sql=truth_sql,
+        correct=correct,
+        selection_method=result.selection_method,
+        winner_generator=winner_gen,
+        cluster_count=result.cluster_count,
+        latency_seconds=latency,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Summary table printer
 # ---------------------------------------------------------------------------
@@ -395,87 +494,156 @@ async def main(args: argparse.Namespace) -> None:
         _print_summary(all_results)
         return
 
-    # Load artifacts per database (one set per unique db_id)
+    # Group pending questions by db_id and determine which DBs are needed
     unique_dbs = sorted({e.db_id for e in pending})
-    print(f"Loading artifacts for {len(unique_dbs)} databases …")
-    db_artifacts: dict[str, _ArtifactsAdapter] = {}
+    print(f"Found {len(unique_dbs)} databases to process ({len(pending)} questions total).")
+
+    # Validate db paths and filter out DBs whose artifacts are missing
     db_paths: dict[str, str] = {}
-
     for db_id in unique_dbs:
-        db_path = _db_path_for_split(split, db_id)
-        db_paths[db_id] = db_path
-        try:
-            da = _load_db_artifacts(db_id, db_path, preprocessed_dir)
-            db_artifacts[db_id] = _ArtifactsAdapter(da)
-            print(f"  [{db_id}] artifacts loaded (FAISS: {len(da.faiss_index._fields)} fields)")
-        except FileNotFoundError as exc:
-            print(f"  [{db_id}] ERROR: artifacts not found — {exc}")
-            # Skip entries for this DB
-            pending = [e for e in pending if e.db_id != db_id]
+        db_paths[db_id] = _db_path_for_split(split, db_id)
 
-    if not pending:
-        print("No questions to evaluate after artifact loading. Exiting.")
-        sys.exit(1)
+    pending_by_db: dict[str, list[BirdEntry]] = {}
+    for entry in pending:
+        pending_by_db.setdefault(entry.db_id, []).append(entry)
 
-    print(f"\nEvaluating {len(pending)} questions ({split}) with {n_workers} workers …\n")
+    # Count total valid tasks (after artifact pre-check below is done per-DB)
+    n_total_expected = len(pending)
 
-    # Build semaphore for concurrency control
+    # Build semaphore for concurrency control (within each DB batch)
     semaphore = asyncio.Semaphore(n_workers)
 
-    # Collect completed results
-    completed_results: list[EvaluationEntry] = []
+    # Shared accumulators
     n_correct = 0
     n_total = 0
 
     # Set up output file (write incrementally as JSON array)
-    # We maintain the full list in memory and write after each result.
     all_serialized: list[dict] = list(existing_results)
 
-    def _save_results():
+    def _save_results() -> None:
         with open(output_path, "w", encoding="utf-8") as fout:
             json.dump(all_serialized, fout, ensure_ascii=False, indent=2)
 
-    # Build coroutine list
-    tasks = []
-    for entry in pending:
-        if entry.db_id not in db_artifacts:
-            continue  # skip entries with missing artifacts
-        tasks.append(
-            _evaluate_one(
-                entry=entry,
-                artifacts=db_artifacts[entry.db_id],
-                db_path=db_paths[entry.db_id],
-                semaphore=semaphore,
-            )
-        )
-
     if _HAS_TQDM:
-        pbar = tqdm(total=len(tasks), unit="q", desc="Evaluating")
+        pbar = tqdm(total=n_total_expected, unit="q", desc="Evaluating")
     else:
         pbar = None
 
-    for coro in asyncio.as_completed(tasks):
-        ev: EvaluationEntry = await coro
-        completed_results.append(ev)
-        n_total += 1
-        if ev.correct:
-            n_correct += 1
+    print(f"\nEvaluating {len(pending)} questions ({split}) with {n_workers} workers …\n")
 
-        # Save incrementally
-        all_serialized.append(asdict(ev))
-        _save_results()
+    # -----------------------------------------------------------------------
+    # Per-DB batch loop — load artifacts, process, then free memory
+    # -----------------------------------------------------------------------
+    for db_id in sorted(pending_by_db.keys()):
+        db_questions = pending_by_db[db_id]
+        db_path = db_paths[db_id]
 
-        ex_pct = n_correct / n_total * 100 if n_total else 0
-        if pbar is not None:
-            pbar.set_postfix(EX=f"{ex_pct:.1f}%", correct=n_correct)
-            pbar.update(1)
-        else:
-            print(
-                f"[{n_total}/{len(tasks)}] Q#{ev.question_id} "
-                f"({ev.db_id}/{ev.difficulty}) "
-                f"correct={ev.correct} method={ev.selection_method} "
-                f"lat={ev.latency_seconds:.1f}s  EX={ex_pct:.1f}%"
-            )
+        # Load artifacts for this DB only
+        print(f"  [{db_id}] Loading artifacts for {len(db_questions)} question(s) …")
+        try:
+            da = _load_db_artifacts(db_id, db_path, preprocessed_dir)
+            artifacts = _ArtifactsAdapter(da)
+            print(f"  [{db_id}] artifacts loaded (FAISS: {len(da.faiss_index._fields)} fields)")
+        except FileNotFoundError as exc:
+            print(f"  [{db_id}] ERROR: artifacts not found — {exc}. Skipping {len(db_questions)} question(s).")
+            if pbar is not None:
+                pbar.update(len(db_questions))
+            n_total += len(db_questions)
+            continue
+
+        # -------------------------------------------------------------------
+        # Phase 1: Run Op5+6 (LSH + FAISS) for ALL questions in this batch.
+        # Each call is gated by the semaphore to limit concurrency.
+        # -------------------------------------------------------------------
+        print(f"  [{db_id}] Phase 1: context grounding + schema linking …")
+
+        async def _gated_prepare(entry: BirdEntry) -> Optional[QuestionContext]:
+            async with semaphore:
+                return await prepare_context(entry, artifacts, db_path)
+
+        contexts: list[Optional[QuestionContext]] = await asyncio.gather(
+            *[_gated_prepare(entry) for entry in db_questions]
+        )
+
+        # -------------------------------------------------------------------
+        # Free heavy indexes — lsh_index and faiss_index are no longer needed.
+        # example_store is also index-backed; free it too.
+        # Only schemas (small text strings) need to stay until after Phase 2.
+        #
+        # Strategy: grab direct references into local variables, clear ALL
+        # attribute references (both `da` and `artifacts` hold separate refs
+        # to the same underlying objects), then `del` the local vars so the
+        # refcount drops to zero and Python immediately frees the objects.
+        # Finally, ask the OS allocator to return the freed pages now — before
+        # Phase 2 starts — so Activity Monitor shows the drop during LLM calls.
+        # -------------------------------------------------------------------
+        _lsh = da.lsh_index
+        _faiss = da.faiss_index
+        _ex = da.example_store
+        da.lsh_index = None
+        da.faiss_index = None
+        da.example_store = None
+        artifacts.lsh_index = None
+        artifacts.faiss_index = None
+        artifacts.example_store = None
+        del _lsh, _faiss, _ex
+        gc.collect()
+        _malloc_trim()  # return freed pages to OS NOW, before Phase 2 LLM calls
+        print(f"  [{db_id}] Index memory freed. Phase 2: SQL generation + selection …")
+
+        # -------------------------------------------------------------------
+        # Phase 2: Run Op7-9 (LLM + SQLite) using the pre-built contexts.
+        # No artifact index access happens here.
+        # -------------------------------------------------------------------
+        def _record(ev: EvaluationEntry) -> None:
+            nonlocal n_total, n_correct
+            n_total += 1
+            if ev.correct:
+                n_correct += 1
+            all_serialized.append(asdict(ev))
+            _save_results()
+            ex_pct = n_correct / n_total * 100
+            if pbar is not None:
+                pbar.set_postfix(EX=f"{ex_pct:.1f}%", correct=n_correct)
+                pbar.update(1)
+            else:
+                print(
+                    f"[{n_total}/{n_total_expected}] Q#{ev.question_id} "
+                    f"({ev.db_id}/{ev.difficulty}) "
+                    f"correct={ev.correct} method={ev.selection_method} "
+                    f"lat={ev.latency_seconds:.1f}s  EX={ex_pct:.1f}%"
+                )
+
+        phase2_tasks = []
+        for entry, ctx in zip(db_questions, contexts):
+            if ctx is None:
+                # Phase 1 failed for this entry — record as error immediately
+                _record(EvaluationEntry(
+                    question_id=entry.question_id,
+                    db_id=entry.db_id,
+                    difficulty=entry.difficulty,
+                    predicted_sql="",
+                    truth_sql=entry.SQL,
+                    correct=False,
+                    selection_method="error",
+                    winner_generator="",
+                    cluster_count=0,
+                    latency_seconds=0.0,
+                ))
+            else:
+                phase2_tasks.append(_evaluate_one_from_context(ctx, semaphore))
+
+        for coro in asyncio.as_completed(phase2_tasks):
+            ev: EvaluationEntry = await coro
+            _record(ev)
+
+        # Free remaining objects and reset tracker
+        del contexts, phase2_tasks, da, artifacts
+        gc.collect()
+        _malloc_trim()
+        get_tracker().reset()
+
+        print(f"  [{db_id}] Done. Memory released.")
 
     if pbar is not None:
         pbar.close()

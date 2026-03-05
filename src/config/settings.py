@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     # Selection
     fast_path_threshold: int = 1
 
+    # Pipeline timeouts (seconds) — increase for slow local providers (e.g. MLX)
+    generator_timeout_s: int = Field(default=600, alias="GENERATOR_TIMEOUT_S")
+    question_soft_timeout_s: int = Field(default=3600, alias="QUESTION_SOFT_TIMEOUT_S")
+
     # Caching
     cache_llm_responses: bool = Field(default=False, alias="CACHE_LLM_RESPONSES")
 

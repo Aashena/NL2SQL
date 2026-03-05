@@ -14,6 +14,7 @@ Extended metrics (v3):
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import logging
 import os
@@ -957,17 +958,12 @@ async def main():
     example_store = ExampleStore.load(example_store_faiss, example_store_meta)
     logger.info("ExampleStore loaded with %d entries", len(example_store._metadata))
 
-    # Pre-load all artifacts (cache per db_id to avoid repeated I/O)
-    db_artifacts: dict[str, dict] = {}
-    db_ids_needed = sorted(set(e.db_id for e in sampled))
-    logger.info("Pre-loading artifacts for %d databases: %s", len(db_ids_needed), db_ids_needed)
-    for db_id in db_ids_needed:
-        logger.info("  Loading artifacts for %s...", db_id)
-        try:
-            db_artifacts[db_id] = load_artifacts(db_id)
-        except Exception as exc:
-            logger.error("  FAILED to load artifacts for %s: %s", db_id, exc)
-            db_artifacts[db_id] = None
+    # Group questions by db_id so we load artifacts for one DB at a time
+    pending_by_db: dict[str, list] = {}
+    for entry in sampled:
+        pending_by_db.setdefault(entry.db_id, []).append(entry)
+    db_ids_needed = sorted(pending_by_db.keys())
+    logger.info("Processing %d databases one at a time: %s", len(db_ids_needed), db_ids_needed)
 
     # Process all questions
     all_results = []
@@ -975,104 +971,120 @@ async def main():
     # This outer value is a safety net only — it should never fire in practice.
     timeout_per_question = _TIMEOUT_TOTAL_SAFETY
 
-    for idx, entry in enumerate(sampled):
-        artifacts = db_artifacts.get(entry.db_id)
-        if artifacts is None:
-            logger.error(
-                "Skipping Q#%d (%s) — artifacts failed to load",
-                entry.question_id, entry.db_id,
-            )
-            all_results.append({
-                "db_id": entry.db_id,
-                "question_id": entry.question_id,
-                "difficulty": entry.difficulty,
-                "question": entry.question,
-                "evidence": entry.evidence,
-                "gold_sql": entry.SQL,
-                "stages": {
-                    "grounding": {"keywords_extracted": 0, "cell_matches": 0, "few_shot_examples": 0, "error": "artifacts not loaded"},
-                    "schema_linking": {"s1_fields": 0, "s2_fields": 0, "error": "artifacts not loaded"},
-                    "generation": {"total_candidates": 0, "by_generator": {"reasoning": 0, "standard": 0, "complex": 0, "icl": 0}, "error_flags": 0, "error": "artifacts not loaded"},
-                    "fixing": {"needed_fix": 0, "fixed_successfully": 0, "still_failing": 0, "original_success_count": 0, "post_fix_success_count": 0, "error": "artifacts not loaded"},
-                    "selection": {"method": "N/A", "winner_generator": "N/A", "cluster_count": 0, "error": "artifacts not loaded"},
-                },
-                "final_sql": "",
-                "correct": False,
-                "error_stage": "artifacts",
-                "oracle_pre_fix": False, "oracle_pre_fix_count": 0,
-                "oracle_post_fix": False, "oracle_post_fix_count": 0,
-                "oracle_total_candidates": 0,
-                "selector_matched_oracle": False,
-                "schema_recall": {},
-                "gold_exec_success": False,
-            })
+    # Global question index (used for progress display inside process_question)
+    idx = 0
+
+    for db_id in db_ids_needed:
+        db_questions = pending_by_db[db_id]
+
+        # Load artifacts for this DB only
+        logger.info("  [%s] Loading artifacts for %d question(s) …", db_id, len(db_questions))
+        try:
+            artifacts = load_artifacts(db_id)
+            logger.info("  [%s] artifacts loaded", db_id)
+        except Exception as exc:
+            logger.error("  [%s] FAILED to load artifacts: %s — skipping %d question(s)", db_id, exc, len(db_questions))
+            for entry in db_questions:
+                all_results.append({
+                    "db_id": entry.db_id,
+                    "question_id": entry.question_id,
+                    "difficulty": entry.difficulty,
+                    "question": entry.question,
+                    "evidence": entry.evidence,
+                    "gold_sql": entry.SQL,
+                    "stages": {
+                        "grounding": {"keywords_extracted": 0, "cell_matches": 0, "few_shot_examples": 0, "error": "artifacts not loaded"},
+                        "schema_linking": {"s1_fields": 0, "s2_fields": 0, "error": "artifacts not loaded"},
+                        "generation": {"total_candidates": 0, "by_generator": {"reasoning": 0, "standard": 0, "complex": 0, "icl": 0}, "error_flags": 0, "error": "artifacts not loaded"},
+                        "fixing": {"needed_fix": 0, "fixed_successfully": 0, "still_failing": 0, "original_success_count": 0, "post_fix_success_count": 0, "error": "artifacts not loaded"},
+                        "selection": {"method": "N/A", "winner_generator": "N/A", "cluster_count": 0, "error": "artifacts not loaded"},
+                    },
+                    "final_sql": "",
+                    "correct": False,
+                    "error_stage": "artifacts",
+                    "oracle_pre_fix": False, "oracle_pre_fix_count": 0,
+                    "oracle_post_fix": False, "oracle_post_fix_count": 0,
+                    "oracle_total_candidates": 0,
+                    "selector_matched_oracle": False,
+                    "schema_recall": {},
+                    "gold_exec_success": False,
+                })
+                idx += 1
             continue
 
-        try:
-            result = await asyncio.wait_for(
-                process_question(entry, artifacts, example_store, idx, len(sampled)),
-                timeout=timeout_per_question,
-            )
-            all_results.append(result)
-        except asyncio.TimeoutError:
-            logger.error(
-                "Q#%d (%s) hit safety-net timeout after %ds — per-stage timeouts should have fired first",
-                entry.question_id, entry.db_id, timeout_per_question,
-            )
-            all_results.append({
-                "db_id": entry.db_id,
-                "question_id": entry.question_id,
-                "difficulty": entry.difficulty,
-                "question": entry.question,
-                "evidence": entry.evidence,
-                "gold_sql": entry.SQL,
-                "stages": {
-                    "grounding": {"keywords_extracted": 0, "cell_matches": 0, "few_shot_examples": 0, "error": None},
-                    "schema_linking": {"s1_fields": 0, "s2_fields": 0, "error": None},
-                    "generation": {"total_candidates": 0, "by_generator": {"reasoning": 0, "standard": 0, "complex": 0, "icl": 0}, "error_flags": 0, "error": None},
-                    "fixing": {"needed_fix": 0, "fixed_successfully": 0, "still_failing": 0, "original_success_count": 0, "post_fix_success_count": 0, "error": None},
-                    "selection": {"method": "N/A", "winner_generator": "N/A", "cluster_count": 0, "error": "timeout"},
-                },
-                "final_sql": "",
-                "correct": False,
-                "error_stage": "timeout",
-                "oracle_pre_fix": False, "oracle_pre_fix_count": 0,
-                "oracle_post_fix": False, "oracle_post_fix_count": 0,
-                "oracle_total_candidates": 0,
-                "selector_matched_oracle": False,
-                "schema_recall": {},
-                "gold_exec_success": False,
-            })
-        except Exception as exc:
-            logger.error(
-                "Unexpected error for Q#%d (%s): %s",
-                entry.question_id, entry.db_id, exc,
-            )
-            logger.debug(traceback.format_exc())
-            all_results.append({
-                "db_id": entry.db_id,
-                "question_id": entry.question_id,
-                "difficulty": entry.difficulty,
-                "question": entry.question,
-                "evidence": entry.evidence,
-                "gold_sql": entry.SQL,
-                "stages": {
-                    "grounding": {"keywords_extracted": 0, "cell_matches": 0, "few_shot_examples": 0, "error": str(exc)},
-                    "schema_linking": {"s1_fields": 0, "s2_fields": 0, "error": None},
-                    "generation": {"total_candidates": 0, "by_generator": {"reasoning": 0, "standard": 0, "complex": 0, "icl": 0}, "error_flags": 0, "error": None},
-                    "fixing": {"needed_fix": 0, "fixed_successfully": 0, "still_failing": 0, "original_success_count": 0, "post_fix_success_count": 0, "error": None},
-                    "selection": {"method": "N/A", "winner_generator": "N/A", "cluster_count": 0, "error": None},
-                },
-                "final_sql": "",
-                "correct": False,
-                "error_stage": "unexpected_exception",
-                "oracle_pre_fix": False, "oracle_pre_fix_count": 0,
-                "oracle_post_fix": False, "oracle_post_fix_count": 0,
-                "oracle_total_candidates": 0,
-                "selector_matched_oracle": False,
-                "schema_recall": {},
-                "gold_exec_success": False,
-            })
+        # Process all questions for this DB sequentially
+        for entry in db_questions:
+            try:
+                result = await asyncio.wait_for(
+                    process_question(entry, artifacts, example_store, idx, len(sampled)),
+                    timeout=timeout_per_question,
+                )
+                all_results.append(result)
+            except asyncio.TimeoutError:
+                logger.error(
+                    "Q#%d (%s) hit safety-net timeout after %ds — per-stage timeouts should have fired first",
+                    entry.question_id, entry.db_id, timeout_per_question,
+                )
+                all_results.append({
+                    "db_id": entry.db_id,
+                    "question_id": entry.question_id,
+                    "difficulty": entry.difficulty,
+                    "question": entry.question,
+                    "evidence": entry.evidence,
+                    "gold_sql": entry.SQL,
+                    "stages": {
+                        "grounding": {"keywords_extracted": 0, "cell_matches": 0, "few_shot_examples": 0, "error": None},
+                        "schema_linking": {"s1_fields": 0, "s2_fields": 0, "error": None},
+                        "generation": {"total_candidates": 0, "by_generator": {"reasoning": 0, "standard": 0, "complex": 0, "icl": 0}, "error_flags": 0, "error": None},
+                        "fixing": {"needed_fix": 0, "fixed_successfully": 0, "still_failing": 0, "original_success_count": 0, "post_fix_success_count": 0, "error": None},
+                        "selection": {"method": "N/A", "winner_generator": "N/A", "cluster_count": 0, "error": "timeout"},
+                    },
+                    "final_sql": "",
+                    "correct": False,
+                    "error_stage": "timeout",
+                    "oracle_pre_fix": False, "oracle_pre_fix_count": 0,
+                    "oracle_post_fix": False, "oracle_post_fix_count": 0,
+                    "oracle_total_candidates": 0,
+                    "selector_matched_oracle": False,
+                    "schema_recall": {},
+                    "gold_exec_success": False,
+                })
+            except Exception as exc:
+                logger.error(
+                    "Unexpected error for Q#%d (%s): %s",
+                    entry.question_id, entry.db_id, exc,
+                )
+                logger.debug(traceback.format_exc())
+                all_results.append({
+                    "db_id": entry.db_id,
+                    "question_id": entry.question_id,
+                    "difficulty": entry.difficulty,
+                    "question": entry.question,
+                    "evidence": entry.evidence,
+                    "gold_sql": entry.SQL,
+                    "stages": {
+                        "grounding": {"keywords_extracted": 0, "cell_matches": 0, "few_shot_examples": 0, "error": str(exc)},
+                        "schema_linking": {"s1_fields": 0, "s2_fields": 0, "error": None},
+                        "generation": {"total_candidates": 0, "by_generator": {"reasoning": 0, "standard": 0, "complex": 0, "icl": 0}, "error_flags": 0, "error": None},
+                        "fixing": {"needed_fix": 0, "fixed_successfully": 0, "still_failing": 0, "original_success_count": 0, "post_fix_success_count": 0, "error": None},
+                        "selection": {"method": "N/A", "winner_generator": "N/A", "cluster_count": 0, "error": None},
+                    },
+                    "final_sql": "",
+                    "correct": False,
+                    "error_stage": "unexpected_exception",
+                    "oracle_pre_fix": False, "oracle_pre_fix_count": 0,
+                    "oracle_post_fix": False, "oracle_post_fix_count": 0,
+                    "oracle_total_candidates": 0,
+                    "selector_matched_oracle": False,
+                    "schema_recall": {},
+                    "gold_exec_success": False,
+                })
+            idx += 1
+
+        # Free this DB's artifacts before loading the next one
+        del artifacts
+        gc.collect()
+        logger.info("  [%s] Done. Memory released.", db_id)
 
     elapsed = time.time() - start_time
 

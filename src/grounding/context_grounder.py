@@ -182,7 +182,7 @@ async def ground_context(
             messages=[{"role": "user", "content": user_message}],
             tools=[_EXTRACT_GROUNDING_TOOL],
             tool_choice_name="extract_grounding",
-            max_tokens=512,
+            max_tokens=2048,
             temperature=0.0,
         )
         if response.tool_inputs:
