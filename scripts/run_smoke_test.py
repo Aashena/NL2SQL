@@ -81,14 +81,15 @@ from src.fixing.query_fixer import QueryFixer, _categorize_error
 from src.selection.adaptive_selector import AdaptiveSelector
 
 # ---------------------------------------------------------------------------
-# Per-stage timeouts — raised to 600 s to accommodate a local MLX 14B model,
-# which can take 4–8 min per stage on complex schemas.
+# Per-stage timeouts.  Generator timeouts are read from settings so that
+# GENERATOR_TIMEOUT_S in .env controls all three generators consistently.
+# Non-generator stages keep fixed values sufficient for any provider.
 # ---------------------------------------------------------------------------
 _TIMEOUT_GROUNDING = 600
 _TIMEOUT_SCHEMA_LINKING = 1800
-_TIMEOUT_GEN_REASONING = 600
-_TIMEOUT_GEN_STANDARD = 600
-_TIMEOUT_GEN_ICL = 600
+_TIMEOUT_GEN_REASONING = settings.generator_timeout_s
+_TIMEOUT_GEN_STANDARD = settings.generator_timeout_s
+_TIMEOUT_GEN_ICL = settings.generator_timeout_s
 _TIMEOUT_FIXING = 600
 _TIMEOUT_SELECTION = 600
 _TIMEOUT_TOTAL_SAFETY = (
@@ -361,19 +362,23 @@ async def _run_gen_with_timeout(coro, timeout_s: int, name: str) -> list:
 
 
 # ---------------------------------------------------------------------------
-# Per-question processing — the heart of the smoke test
+# Per-question processing — two phases so indices can be freed between them
 # ---------------------------------------------------------------------------
 
-async def _process_question_body(
+async def _ops_5_6_body(
     entry,
     artifacts: dict,
     example_store: ExampleStore,
     question_idx: int,
     total: int,
-) -> dict:
+) -> tuple:
     """
-    Run Ops 5–9 for one question (called after the semaphore is acquired).
+    Phase 1: Run Ops 5-6 for one question (context grounding + schema linking).
 
+    Returns (partial_trace, grounding_ctx, linked_schemas, gold_exec, t_total_start).
+    After all questions in a DB batch have completed this function, the caller
+    may free artifacts["lsh_index"] and artifacts["faiss_index"] — they are
+    not accessed again in Phase 2.
     """
     db_id = entry.db_id
     question = entry.question
@@ -388,23 +393,15 @@ async def _process_question_body(
         question[:80],
     )
 
-    # Shared state across stages
     grounding_ctx: Optional[GroundingContext] = None
     linked_schemas: Optional[LinkedSchemas] = None
-    all_candidates: list = []
-    fixed_candidates: list = []
-    correct_post_fix_sqls: set[str] = set()
 
-    # ---------------------------------------------------------------
-    # Execute gold SQL upfront (reused for oracle + eval)
-    # ---------------------------------------------------------------
+    # Execute gold SQL upfront (cheap local SQLite call; reused for oracle + eval in Phase 2)
     gold_exec = execute_sql(db_path, gold_sql)
     if not gold_exec.success:
         logger.warning("  [Gold] Gold SQL failed: %s", gold_exec.error)
 
-    # ---------------------------------------------------------------
-    # Trace dict — populated incrementally
-    # ---------------------------------------------------------------
+    # Partial trace dict — completed by _ops_7_9_body
     trace: dict = {
         "question_id": entry.question_id,
         "db_id": db_id,
@@ -595,6 +592,67 @@ async def _process_question_body(
     finally:
         op6["duration_s"] = round(time.monotonic() - t0, 3)
         trace["op6"] = op6
+
+    return trace, grounding_ctx, linked_schemas, gold_exec, t_total_start
+
+
+def _build_error_trace(entry, error_stage: str, error_msg: str) -> dict:
+    """Build a minimal error trace for a question that failed in Phase 1."""
+    gold_sql = entry.SQL
+    return {
+        "question_id": entry.question_id,
+        "db_id": entry.db_id,
+        "difficulty": entry.difficulty,
+        "question": entry.question,
+        "evidence": entry.evidence or "",
+        "truth_sql": gold_sql,
+        "gold_exec_success": False,
+        "gold_row_count": None,
+        "predicted_sql": "",
+        "correct": False,
+        "selection_method": "error",
+        "winner_generator": "",
+        "cluster_count": 0,
+        "latency_s": 0.0,
+        "error_stage": error_stage,
+        "oracle_pre_fix": False,
+        "oracle_pre_fix_count": 0,
+        "oracle_post_fix": False,
+        "oracle_post_fix_count": 0,
+        "oracle_total_candidates": 0,
+        "selector_matched_oracle": False,
+        "op5": {"error": error_msg},
+        "op6": {"error": error_msg},
+        "op7": {},
+        "op8": {},
+        "op9": {},
+        "eval": {},
+    }
+
+
+async def _ops_7_9_body(
+    entry,
+    db_path: str,
+    grounding_ctx: GroundingContext,
+    linked_schemas: LinkedSchemas,
+    trace: dict,
+    gold_exec,
+    t_total_start: float,
+) -> dict:
+    """
+    Phase 2: Run Ops 7-9 + eval for one question (generation, fixing, selection).
+
+    Takes no artifact references — only lightweight context objects.
+    Safe to call after lsh_index and faiss_index have been freed.
+    Returns the completed trace dict.
+    """
+    db_id = entry.db_id
+    question = entry.question
+    evidence = entry.evidence or ""
+    gold_sql = entry.SQL
+    all_candidates: list = []
+    fixed_candidates: list = []
+    correct_post_fix_sqls: set[str] = set()
 
     # ===================================================================
     # Op 7: Diverse SQL Generation (3 generators in parallel)
@@ -961,26 +1019,6 @@ async def _process_question_body(
     return trace
 
 
-async def process_question(
-    entry,
-    artifacts: dict,
-    example_store: ExampleStore,
-    question_idx: int,
-    total: int,
-    semaphore: asyncio.Semaphore,
-) -> dict:
-    """
-    Acquire the concurrency semaphore then run ``_process_question_body``
-    with a safety-net timeout that starts *after* the semaphore is acquired,
-    so queue-wait time does not consume the budget.
-    """
-    async with semaphore:
-        return await asyncio.wait_for(
-            _process_question_body(entry, artifacts, example_store, question_idx, total),
-            timeout=_TIMEOUT_TOTAL_SAFETY,
-        )
-
-
 # ---------------------------------------------------------------------------
 # Summary computation
 # ---------------------------------------------------------------------------
@@ -1248,10 +1286,7 @@ async def main(args: argparse.Namespace) -> None:
     # Process questions one database at a time — load artifacts, run all
     # questions for that DB concurrently, then free memory before next DB.
     # -----------------------------------------------------------------------
-    semaphore = asyncio.Semaphore(args.workers)
-
-    # Precompute the original sampled index per question_id (used by
-    # process_question for progress display).
+    # Precompute the original sampled index per question_id (for progress display)
     sampled_idx: dict[int, int] = {e.question_id: i for i, e in enumerate(sampled)}
 
     # Group pending questions by db_id
@@ -1264,6 +1299,14 @@ async def main(args: argparse.Namespace) -> None:
             json.dump(completed_traces, f, ensure_ascii=False, indent=2)
         with open(results_path, "w", encoding="utf-8") as f:
             json.dump(completed_results, f, ensure_ascii=False, indent=2)
+
+    # Phase 1 timeout: grounding + schema linking + small buffer
+    _P1_TIMEOUT = _TIMEOUT_GROUNDING + _TIMEOUT_SCHEMA_LINKING + 30
+    # Phase 2 timeout: generation + fixing + selection + small buffer
+    _P2_TIMEOUT = (
+        max(_TIMEOUT_GEN_REASONING, _TIMEOUT_GEN_STANDARD, _TIMEOUT_GEN_ICL)
+        + _TIMEOUT_FIXING + _TIMEOUT_SELECTION + 60
+    )
 
     for db_id in sorted(pending_by_db.keys()):
         db_questions = pending_by_db[db_id]
@@ -1280,57 +1323,79 @@ async def main(args: argparse.Namespace) -> None:
         except Exception as exc:
             logger.error("  [%s] FAILED to load artifacts: %s — skipping %d question(s)", db_id, exc, len(db_questions))
             for entry in db_questions:
-                completed_traces.append({
-                    "question_id": entry.question_id,
-                    "db_id": entry.db_id,
-                    "difficulty": entry.difficulty,
-                    "question": entry.question,
-                    "evidence": entry.evidence,
-                    "truth_sql": entry.SQL,
-                    "predicted_sql": "",
-                    "correct": False,
-                    "selection_method": "error",
-                    "winner_generator": "",
-                    "cluster_count": 0,
-                    "latency_s": 0.0,
-                    "error_stage": "artifacts_not_loaded",
-                    "oracle_pre_fix": False,
-                    "oracle_pre_fix_count": 0,
-                    "oracle_post_fix": False,
-                    "oracle_post_fix_count": 0,
-                    "oracle_total_candidates": 0,
-                    "selector_matched_oracle": False,
-                    "gold_exec_success": False,
-                    "gold_row_count": None,
-                    "op5": {"error": "artifacts not loaded"},
-                    "op6": {"error": "artifacts not loaded"},
-                    "op7": {"error": "artifacts not loaded"},
-                    "op8": {"error": "artifacts not loaded"},
-                    "op9": {"error": "artifacts not loaded"},
-                    "eval": {},
-                })
-                completed_results.append(_trace_to_result(completed_traces[-1]))
+                error_trace = _build_error_trace(entry, "artifacts_not_loaded", "artifacts not loaded")
+                completed_traces.append(error_trace)
+                completed_results.append(_trace_to_result(error_trace))
             _save_incremental()
             continue
 
-        # Build tasks for this DB's pending questions only
-        db_tasks = [
-            process_question(
-                entry, artifacts, example_store,
-                sampled_idx[entry.question_id], len(sampled), semaphore,
-            )
-            for entry in db_questions
-        ]
+        # ── PHASE 1: Op 5-6 for ALL questions (index-heavy) ──────────────────
+        # Run concurrently; gather ALL results before freeing indices.
+        phase1_semaphore = asyncio.Semaphore(args.workers)
 
-        # Drain this DB's questions with full async concurrency
-        for coro in asyncio.as_completed(db_tasks):
+        async def _p1(entry_=None, idx_=None):
+            async with phase1_semaphore:
+                return await asyncio.wait_for(
+                    _ops_5_6_body(entry_, artifacts, example_store, idx_, len(sampled)),
+                    timeout=_P1_TIMEOUT,
+                )
+
+        phase1_tasks = [
+            _p1(entry_=e, idx_=sampled_idx[e.question_id])
+            for e in db_questions
+        ]
+        phase1_results = await asyncio.gather(*phase1_tasks, return_exceptions=True)
+
+        # ── FREE INDICES: LSH and FAISS not needed for Op 7-9 ────────────────
+        artifacts["lsh_index"] = None
+        artifacts["faiss_index"] = None
+        gc.collect()
+        logger.info("  [%s] LSH + FAISS freed after Op 5-6.", db_id)
+
+        # ── PHASE 2: Op 7-9 for ALL questions (LLM-only) ─────────────────────
+        db_path = artifacts["db_path"]
+        phase2_semaphore = asyncio.Semaphore(args.workers)
+        phase2_tasks = []
+
+        for entry, p1 in zip(db_questions, phase1_results):
+            if isinstance(p1, Exception):
+                error_trace = _build_error_trace(entry, "phase1_error", str(p1))
+                completed_traces.append(error_trace)
+                completed_results.append(_trace_to_result(error_trace))
+                logger.error("  [%s] Phase 1 failed for Q#%d: %s", db_id, entry.question_id, p1)
+            else:
+                partial_trace, grounding_ctx, linked_schemas, gold_exec, t_total_start = p1
+
+                async def _p2(
+                    entry_=None, grounding_=None, schemas_=None,
+                    trace_=None, gold_=None, t_start_=None,
+                ):
+                    async with phase2_semaphore:
+                        return await asyncio.wait_for(
+                            _ops_7_9_body(
+                                entry_, db_path, grounding_, schemas_,
+                                trace_, gold_, t_start_,
+                            ),
+                            timeout=_P2_TIMEOUT,
+                        )
+
+                phase2_tasks.append(_p2(
+                    entry_=entry,
+                    grounding_=grounding_ctx,
+                    schemas_=linked_schemas,
+                    trace_=partial_trace,
+                    gold_=gold_exec,
+                    t_start_=t_total_start,
+                ))
+
+        for coro in asyncio.as_completed(phase2_tasks):
             try:
                 trace = await coro
             except asyncio.TimeoutError:
-                logger.error("Question hit safety-net timeout of %ds", _TIMEOUT_TOTAL_SAFETY)
+                logger.error("Phase 2 question hit timeout of %ds", _P2_TIMEOUT)
                 continue
             except Exception as exc:
-                logger.error("Unexpected error processing question: %s", exc)
+                logger.error("Unexpected error in Phase 2: %s", exc)
                 logger.debug(traceback.format_exc())
                 continue
 
@@ -1339,10 +1404,10 @@ async def main(args: argparse.Namespace) -> None:
             _save_incremental()
             print_running_summary(completed_results)
 
-        # Free this DB's artifacts before loading the next one
+        # Free remaining artifacts before loading the next DB
         del artifacts
         gc.collect()
-        logger.info("  [%s] Done. Memory released.", db_id)
+        logger.info("  [%s] Done. All memory released.", db_id)
 
     print()  # newline after progress indicator
 
