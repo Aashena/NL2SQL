@@ -30,7 +30,7 @@ class AnthropicClient(LLMClient):
         # tenacity never gets a chance to retry because the await never returns.
         self._client = anthropic.AsyncAnthropic(
             api_key=api_key,
-            timeout=httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=10.0),
+            timeout=httpx.Timeout(connect=10.0, read=None, write=30.0, pool=10.0),
         )
 
     async def _generate_single(
