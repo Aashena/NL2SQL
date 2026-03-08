@@ -35,6 +35,8 @@ import os
 import re
 import sys
 import time
+
+import psutil
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Optional
@@ -105,6 +107,14 @@ def _malloc_trim() -> None:
             libc.malloc_trim(ctypes.c_size_t(0))
     except Exception:
         pass  # non-critical — just best-effort
+
+
+def _mem_mib(label: str) -> float:
+    """Log and return the process RSS in MiB at the given checkpoint label."""
+    rss_bytes = psutil.Process().memory_info().rss
+    rss_mib = rss_bytes / (1024 ** 2)
+    print(f"  [MEM] {label}: {rss_mib:.1f} MiB RSS", flush=True)
+    return rss_mib
 
 
 try:
@@ -458,6 +468,9 @@ async def main(args: argparse.Namespace) -> None:
     db_filter = args.db_filter
     resume_path = args.resume
 
+    # Baseline memory measurement (after all imports + model loading)
+    _mem_mib("startup baseline (imports + model loading done)")
+
     # Ensure output directory exists
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -540,10 +553,12 @@ async def main(args: argparse.Namespace) -> None:
 
         # Load artifacts for this DB only
         print(f"  [{db_id}] Loading artifacts for {len(db_questions)} question(s) …")
+        mem_before_load = _mem_mib(f"{db_id} before loading artifacts")
         try:
             da = _load_db_artifacts(db_id, db_path, preprocessed_dir)
             artifacts = _ArtifactsAdapter(da)
-            print(f"  [{db_id}] artifacts loaded (FAISS: {len(da.faiss_index._fields)} fields)")
+            mem_after_load = _mem_mib(f"{db_id} after loading artifacts (FAISS: {len(da.faiss_index._fields)} fields)")
+            print(f"  [{db_id}] artifacts loaded — index memory added: {mem_after_load - mem_before_load:+.1f} MiB")
         except FileNotFoundError as exc:
             print(f"  [{db_id}] ERROR: artifacts not found — {exc}. Skipping {len(db_questions)} question(s).")
             if pbar is not None:
@@ -577,6 +592,7 @@ async def main(args: argparse.Namespace) -> None:
         # Finally, ask the OS allocator to return the freed pages now — before
         # Phase 2 starts — so Activity Monitor shows the drop during LLM calls.
         # -------------------------------------------------------------------
+        mem_before_free = _mem_mib(f"{db_id} before freeing indexes")
         _lsh = da.lsh_index
         _faiss = da.faiss_index
         _ex = da.example_store
@@ -589,7 +605,12 @@ async def main(args: argparse.Namespace) -> None:
         del _lsh, _faiss, _ex
         gc.collect()
         _malloc_trim()  # return freed pages to OS NOW, before Phase 2 LLM calls
-        print(f"  [{db_id}] Index memory freed. Phase 2: SQL generation + selection …")
+        mem_after_free = _mem_mib(f"{db_id} after freeing indexes + gc.collect() + malloc_trim")
+        print(
+            f"  [{db_id}] Index memory freed: {mem_after_free - mem_before_free:+.1f} MiB "
+            f"(before={mem_before_free:.1f}, after={mem_after_free:.1f}). "
+            f"Phase 2: SQL generation + selection …"
+        )
 
         # -------------------------------------------------------------------
         # Phase 2: Run Op7-9 (LLM + SQLite) using the pre-built contexts.
@@ -643,6 +664,7 @@ async def main(args: argparse.Namespace) -> None:
         _malloc_trim()
         get_tracker().reset()
 
+        mem_end = _mem_mib(f"{db_id} after Phase 2 complete + final gc")
         print(f"  [{db_id}] Done. Memory released.")
 
     if pbar is not None:
