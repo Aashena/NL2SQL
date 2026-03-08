@@ -1196,62 +1196,95 @@ Implement shared utilities:
 
 ---
 
-## Operation 8: Query Fixer
+## Operation 8: Query Fixer + Semantic Verifier (integrated)
 
-**File:** `src/fixing/query_fixer.py`
+**Files:** `src/fixing/query_fixer.py`, `src/verification/query_verifier.py`
 
-**Goal:** For each candidate SQL that fails execution, attempt up to β=2 fix iterations using a lightweight LLM.
+**Goal:** For each SQL candidate, run a two-stage fix loop that checks both
+*executability* (Stage A) and *semantic correctness* (Stage B — verification).
+The fix LLM receives combined feedback from both stages. The verification plan
+is generated once per question (1 LLM call) and reused across all candidates.
 
 ### Implementation Steps
 
-**Step 8.1 — Execute All Candidates**
+**Step 8.1 — Generate Verification Plan (once per question)**
+
+One LLM call (model_fast) generates a list of `VerificationTestSpec` objects
+applicable to this question. These describe semantic checks the correct SQL
+should pass.
+
+Nine verification test types:
+
+| Type | Category | Method |
+|------|----------|--------|
+| `grain` | Cheap | Compare result row count to expected entity count via verification SQL |
+| `null` | Cheap | Check result rows for unexpected NULL values |
+| `duplicate` | Cheap | Detect JOIN-induced row multiplication via verification SQL |
+| `ordering` | Cheap | Structural: required SQL keywords (ORDER BY + LIMIT) present? |
+| `scale` | Cheap | Numeric result values within expected range (percentages 0–100, etc.) |
+| `completeness` | Cheap | "All X" question: row count == DB total (verification SQL) |
+| `column_alignment` | Expensive | LLM judgment: do SELECT columns answer the question? |
+| `boundary` | Expensive | LLM judgment: do date/time constraints match the question's period? |
+| `symmetry` | Expensive | Run complementary SQL, compare totals numerically |
+
+Cheap tests run every fix iteration (zero LLM cost).
+Expensive tests run only on the final assessment pass.
+
+**Step 8.2 — Execute All Candidates**
 
 Execute each candidate against the database:
-- Collect: `success` (bool), `error_message` (str|None), `result_rows` (list), `is_empty` (bool)
-- Flag candidates that need fixing: `not success` OR `is_empty`
+- Collect: `success` (bool), `error` (str|None), `rows` (list), `is_empty` (bool)
 
-**Step 8.2 — Error Categorization**
+**Step 8.3 — Two-Stage Fix Loop (β + 1 iterations per candidate)**
 
-Categorize errors for targeted fix prompts:
-- `syntax_error`: SQLite syntax error (e.g., "near 'FORM': syntax error")
-- `schema_error`: Column/table not found (e.g., "no such column: frpm.Score")
-- `type_error`: Type mismatch in comparison
-- `empty_result`: Query is valid but returns 0 rows
+The loop runs `β + 1` times (β = 2 fix opportunities + 1 final assessment):
 
-Different error types get different fix instructions:
-- Syntax: "Fix the SQL syntax error: {error}"
-- Schema: "The column '{col}' doesn't exist. Check the schema and use the correct column name."
-- Empty: "The query returned no rows. Review the WHERE conditions — they may be too restrictive."
-
-**Step 8.3 — Fix Loop**
-
-For each candidate needing a fix:
 ```
-for iteration in range(β=2):
-    if not (candidate.error or candidate.is_empty):
-        break
+for iteration in range(β + 1):
+    is_final = (iteration == β)
 
-    fixed_sql = call_fixer_llm(candidate, error_info, schema, question)
-    candidate = execute_and_update(fixed_sql)
+    # Stage A: Executability check
+    exec_ok = current_result.success AND NOT current_result.is_empty
+
+    # Stage B: Verification (only when execution succeeded)
+    verif_eval = None
+    if exec_ok and verif_specs:
+        verif_eval = evaluate_candidate(
+            specs, sql, exec_result, db_path,
+            run_expensive=is_final  # expensive tests only on final pass
+        )
+
+    verif_ok = verif_eval is None or verif_eval.all_pass
+
+    if exec_ok AND verif_ok:
+        break  # Both stages pass — done!
+    if is_final:
+        break  # Budget exhausted — accept best result
+
+    # Build combined feedback and call fixer LLM
+    combined_feedback = format_issues(exec_issues, verif_failures)
+    fixed_sql = fixer_llm(current_sql, combined_feedback, schema, question)
+    current_result = execute(fixed_sql)
+    fix_iterations += 1
 ```
 
-**Model:** `claude-haiku-4-5-20251001` (fast, sufficient for targeted error correction).
+**Model:** `model_fast` (Haiku / Gemini Flash).
 
-**Fix prompt:**
+**Enhanced fix prompt format:**
 ```
-You are an expert SQL debugger. Fix the SQL query below.
-
-Database Schema:
-{schema_ddl}  # Use S₂ for maximum context
-
-Question: {question}
-Evidence: {evidence}
-Matched values in database: {cell_matches}
-
-Broken SQL:
+Current SQL:
 {sql}
 
-Error: {error_message}
+Issues found:
+
+[Execution Error]            ← if execution failed
+  Fix the SQL syntax error: near 'FORM': syntax error
+
+[Verification Issues]        ← if execution succeeded but verification failed
+  - GRAIN TEST FAILED: Result has 6 rows but expected 3 (one per student).
+    Hint: Use GROUP BY student_id to get one row per student.
+  - ORDERING TEST FAILED: Missing required SQL clauses: ['ORDER BY', 'LIMIT'].
+    Hint: Add ORDER BY gpa DESC LIMIT 5.
 
 Write only the corrected SQL query. No explanation.
 ```
@@ -1264,41 +1297,83 @@ class FixedCandidate:
     original_sql: str
     final_sql: str
     generator_id: str
-    fix_iterations: int  # 0 if no fix needed
+    fix_iterations: int                          # 0 if no fix needed
     execution_result: ExecutionResult
-    confidence_score: float  # computed in Step 8.5
+    confidence_score: float                      # computed in Step 8.5
+    verification_results: Optional[VerificationEvaluation] = None
 ```
 
-**Step 8.5 — Confidence Scoring (Improvement)**
+**Step 8.5 — Confidence Scoring**
 
 Assign a confidence score to each candidate:
 - `+1.0` if execution succeeds and result is non-empty
 - `+0.5` bonus if result size is "plausible" (1–100 rows for non-aggregation, 1 row for aggregation)
-- `-0.5` if required 1 or 2 fix iterations to execute
-- `0.0` if still failing after β=2 fixes (discard from pool)
+- `-0.5` per fix iteration needed
+- `+/−` verification adjustment:
+  - Critical test FAIL (grain, duplicate, column_alignment): `−0.3` each
+  - Minor test FAIL (null, ordering, scale, boundary, symmetry, completeness): `−0.1` each
+  - All applicable tests PASS: `+0.2` bonus (capped)
+- `0.0` if still failing after β=2 fixes (excluded from normalization pool)
 
 Normalize scores to [0, 1] across the candidate pool.
 
-#### Tests for Query Fixer
+**Step 8.6 — LLM Cost**
 
-**File:** `tests/unit/test_query_fixer.py`
+One plan generation call per question (+1 to total cost). Most evaluation is
+free (SQLite execution, structural analysis). Expensive LLM-judgment tests
+(column_alignment, boundary, symmetry) run only on the final pass.
 
-**Test setup:** Use a real SQLite in-memory database; mock the Claude API for fix calls.
+#### Tests
 
-**Tests to write:**
+**Files:**
+- `tests/unit/test_query_fixer.py` — Fix loop tests (12 original + 11 new)
+- `tests/unit/test_query_verifier.py` — Verifier unit tests (14 tests)
 
-1. `test_valid_sql_passes_through_unchanged` — A syntactically correct SQL that returns rows gets fix_iterations=0 and is unchanged.
-2. `test_syntax_error_triggers_fix` — SQL with syntax error ("SELECT form students") triggers a fix call.
-3. `test_empty_result_triggers_fix` — Valid SQL returning 0 rows triggers a fix call.
-4. `test_max_2_iterations` — Even if both fix iterations fail, the loop stops at 2 (no more API calls).
-5. `test_fix_uses_haiku_model` — Fix API calls use `claude-haiku-4-5-20251001`.
-6. `test_still_failing_candidate_discarded` — Candidates that fail all β=2 fix attempts have confidence_score=0.0.
-7. `test_error_categorization_syntax` — "near 'FORM'" error is categorized as `syntax_error`.
-8. `test_error_categorization_schema` — "no such column" error is categorized as `schema_error`.
-9. `test_error_message_in_fix_prompt` — The actual error message is included verbatim in the fix prompt.
-10. `test_confidence_score_higher_for_clean_success` — A candidate that executes immediately has higher confidence than one that needed 1 fix.
-11. `test_confidence_score_plausibility_bonus` — Aggregation query returning exactly 1 row gets plausibility bonus.
-12. `test_parallel_fixing_independent_candidates` — Fix calls for multiple candidates can run concurrently.
+**Test setup:** Real SQLite DB; mock the LLM client; inject mock verifier via
+`QueryFixer(verifier=mock_verifier)` for isolation.
+
+**Query fixer tests:**
+
+1. `test_valid_sql_passes_through_unchanged` — Correct SQL with rows → fix_iterations=0, unchanged.
+2. `test_syntax_error_triggers_fix` — Syntax error triggers fix call.
+3. `test_empty_result_triggers_fix` — 0-row result triggers fix call.
+4. `test_max_2_iterations` — Loop stops at β=2 even if both fixes fail.
+5. `test_fix_uses_haiku_model` — Fix calls use `settings.model_fast`.
+6. `test_still_failing_candidate_discarded` — Post-β failure → confidence_score=0.0.
+7. `test_error_categorization_syntax` — "near 'FORM'" → `syntax_error`.
+8. `test_error_categorization_schema` — "no such column" → `schema_error`.
+9. `test_error_message_in_fix_prompt` — Error message appears in fix prompt.
+10. `test_confidence_score_higher_for_clean_success` — Clean success > fixed candidate.
+11. `test_confidence_score_plausibility_bonus` — Aggregation 1-row gets plausibility bonus.
+12. `test_parallel_fixing_independent_candidates` — Fixes run concurrently.
+13. `test_verification_plan_generated_once_per_question` — generate_plan() called once.
+14. `test_exec_ok_triggers_verification` — Successful exec triggers evaluate_candidate().
+15. `test_exec_fail_skips_verification` — Exec failure skips verification.
+16. `test_fix_prompt_includes_verif_failures` — Verif failures appear in fix prompt.
+17. `test_fix_prompt_includes_exec_error` — Exec error appears in fix prompt.
+18. `test_verif_pass_breaks_loop_early` — Both pass on iter 0 → no fix call.
+19. `test_expensive_tests_run_on_final_iteration_only` — run_expensive=True on final check.
+20. `test_confidence_penalized_for_critical_verif_failure` — Critical fail → lower confidence.
+21. `test_confidence_bonus_all_verif_pass` — All pass → bonus confidence.
+22. `test_fixed_candidate_has_verification_results` — VerificationEvaluation attached.
+23. `test_verification_failure_then_fixed` — Verif fail on iter 0, fixed to pass on iter 1.
+
+**Query verifier tests:**
+
+1. `test_generate_plan_returns_structured_tests` — Mock LLM → list[VerificationTestSpec].
+2. `test_generate_plan_returns_empty_on_llm_error` — LLMError → returns [] (never raises).
+3. `test_grain_test_pass` — Row count matches verification SQL count → pass.
+4. `test_grain_test_fail` — Row count differs → fail with meaningful details.
+5. `test_null_test_pass` — No NULLs in result rows → pass.
+6. `test_null_test_fail` — NULL values present → fail.
+7. `test_duplicate_test_detects_join_multiplication` — 6 rows / 3 distinct → fail.
+8. `test_ordering_test_structural_missing_order_by` — No ORDER BY → fail.
+9. `test_ordering_test_pass_when_keywords_present` — ORDER BY + LIMIT → pass.
+10. `test_scale_test_out_of_range_percentage` — Value > 100 → fail.
+11. `test_expensive_tests_skipped_when_run_expensive_false` — column_alignment skipped.
+12. `test_adjustment_computation_critical_fail` — Critical fail → -0.3.
+13. `test_adjustment_computation_all_pass_bonus` — All pass → +0.2.
+14. `test_evaluation_error_becomes_error_no_penalty` — Error status → no critical penalty.
 
 ---
 

@@ -59,12 +59,12 @@ The system is split into two phases:
 │  (Question, Evidence) ──► Op 5: Context Grounding                    │
 │                       ──► Op 6: Adaptive Schema Linking  (S₁, S₂)   │
 │                       ──► Op 7: Diverse SQL Generation   (10-11 cands)│
-│                       ──► Op 8: Query Fixer                          │
+│                       ──► Op 8: Query Fixer + Semantic Verifier      │
 │                       ──► Op 9: Adaptive Selection ──► Final SQL     │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-**Expected inference cost per question:** 13–67 LLM calls
+**Expected inference cost per question:** 14–68 LLM calls
 (vs. Agentar: 20–630 | CHASE-SQL: ~480 | XiYan: ~12–15)
 
 ---
@@ -250,15 +250,19 @@ Uses `model_powerful` with few-shot examples from the Example Store:
 3. Schema scope (S₁ precise vs. S₂ recall)
 4. Prompting strategy (direct / CoT / step-back / few-shot ICL)
 
-#### Op 8 — Query Fixer (`src/fixing/query_fixer.py`)
+#### Op 8 — Query Fixer + Semantic Verifier (`src/fixing/query_fixer.py`, `src/verification/query_verifier.py`)
 
-Executed for each candidate independently (all concurrently via `asyncio.gather()`):
+Two-stage verification integrated into the fix loop:
 
-1. Execute the candidate SQL against the SQLite database
-2. If **syntax error** or **empty result set** → enter fix loop (max β = 2 iterations)
-3. The fixer LLM (`model_fast`) receives: original SQL, error message, S₂ DDL schema, question, evidence
-4. Error type is categorized: `syntax_error` / `schema_error` / `type_error` / `empty_result`
-5. Cleaned SQL replaces the original; fix count is recorded
+1. **Verification plan generation** (once per question, 1 LLM call): generates a list of semantic
+   tests applicable to the question — grain, null, duplicate, ordering, scale, completeness (cheap),
+   plus column_alignment, boundary, symmetry (expensive, LLM-judged)
+2. **Per-candidate fix loop** (β + 1 = 3 iterations total: 2 fix attempts + 1 final assessment):
+   - **Stage A:** Execute SQL → check executability (syntax/schema/empty errors)
+   - **Stage B:** If execution succeeded, evaluate verification tests (cheap every iteration;
+     expensive only on final pass)
+   - If both stages pass → break early; else fix with **combined feedback** from both stages
+3. Fix LLM (`model_fast`) receives execution errors AND verification failure hints in one prompt
 
 **Confidence scoring** (applied after fixing):
 
@@ -267,11 +271,15 @@ Executed for each candidate independently (all concurrently via `asyncio.gather(
 | Successful execution | +1.0 |
 | Plausible result size (aggregation → 1 row, non-agg → 1–100 rows) | +0.5 |
 | Per fix iteration required | −0.5 |
+| Critical verification failure (grain, duplicate, column_alignment) | −0.3 each |
+| Minor verification failure (null, ordering, scale, boundary, symmetry) | −0.1 each |
+| All applicable verification tests pass | +0.2 bonus |
 | Still failing after all iterations | 0.0 |
 
 Scores are normalized across the candidate pool (all-zero → all 1.0).
 
-Output: list of `FixedCandidate` objects with `sql`, `success`, `confidence`, `fix_count`.
+Output: list of `FixedCandidate` objects with `sql`, `success`, `confidence`, `fix_count`,
+`verification_results` (`VerificationEvaluation`).
 
 #### Op 9 — Adaptive Selection (`src/selection/adaptive_selector.py`)
 
@@ -349,7 +357,10 @@ NL2SQL/
 │   │   ├── standard_generator.py  # Op 7B: Standard + complex generators (4 candidates)
 │   │   └── icl_generator.py       # Op 7C: ICL few-shot generator (2–3 candidates)
 │   ├── fixing/
-│   │   └── query_fixer.py         # Op 8: Execute → fix errors/empty results
+│   │   └── query_fixer.py         # Op 8: Execute → fix errors/verify semantics
+│   ├── verification/
+│   │   ├── __init__.py
+│   │   └── query_verifier.py      # Op 8 (integrated): semantic verification plan
 │   ├── selection/
 │   │   └── adaptive_selector.py   # Op 9: Cluster → fast-path / tournament selection
 │   ├── cache/
@@ -604,16 +615,21 @@ Shared utilities available to all generators:
 
 ---
 
-### Query Fixer
+### Query Fixer + Semantic Verifier
 
-**`src/fixing/query_fixer.py`**
+**`src/fixing/query_fixer.py`**, **`src/verification/query_verifier.py`**
 
 - `QueryFixer.fix_candidates(candidates, question, evidence, schemas, db_path, cell_matches)` → `list[FixedCandidate]`
+- `QueryFixer(verifier=...)` — optional verifier injection for testing
 - All candidates fixed concurrently via `asyncio.gather()`
-- Fix loop uses `model_fast` with `temperature=0.0`
-- Error type regex categorization: `syntax_error` / `schema_error` / `type_error` / `empty_result`
-- `clean_sql()` applied to LLM fix responses to strip markdown fences
-- `FixedCandidate` fields: `sql`, `generator_id`, `success`, `fix_count`, `confidence`, `execution_result`
+- Fix loop: β + 1 = 3 iterations (2 fix attempts + 1 final assessment)
+- Stage A: executability check; Stage B: semantic verification (9 test types)
+- Fix prompt includes combined execution + verification feedback
+- `QueryVerifier.generate_plan(question, evidence, schema)` → 1 LLM call (question-level)
+- `QueryVerifier.evaluate_candidate(specs, candidate_id, sql, exec_result, db_path, run_expensive)` → `VerificationEvaluation`
+- Cheap tests (grain, null, duplicate, ordering, scale, completeness): SQL/structural, zero LLM cost
+- Expensive tests (column_alignment, boundary, symmetry): `model_fast` LLM judgment, final pass only
+- `FixedCandidate` fields: `original_sql`, `final_sql`, `generator_id`, `fix_iterations`, `confidence_score`, `execution_result`, `verification_results`
 
 ---
 
@@ -900,9 +916,9 @@ Never use "first N questions" — BIRD dev questions are ordered by database, so
 | Context Grounding (Op 5) | 1 | Keyword extraction with fast model |
 | Schema Linking (Op 6) | 2–3 | FAISS (free) + 2 LLM column selection calls |
 | SQL Generation (Op 7) | 10–11 | 4 reasoning + 4 standard/complex + 2–3 ICL |
-| Query Fixing (Op 8) | 0–22 | Conditional; β=2 max; ~2–5 on average |
+| Query Fixing (Op 8) | 1–23 | 1 plan generation + conditional fixes; β=2 max; ~3–6 on average |
 | Selection (Op 9) | 0–28 | Fast path: 0; worst case C(8,2)=28 |
-| **Total** | **13–67** | Average ~20–35 |
+| **Total** | **14–68** | Average ~21–36 |
 
 ### Key design decisions
 

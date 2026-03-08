@@ -11,15 +11,18 @@ captures the full intermediate state at every pipeline stage for later
 post-mortem analysis.
 
 Output files (all written to --output_dir):
-  results.json            — Per-question results; EvaluationEntry-compatible
-                            (question_id, db_id, difficulty, correct, latency_s, …)
-  detailed_traces.json    — Full per-question trace (all intermediate outputs
-                            for every op, per-candidate details, oracle metrics)
-  component_summary.json  — Aggregated metrics per pipeline component
-                            (op5/op6/op7/op8/op9 statistics)
-  failed_questions.json   — Only the questions that were answered incorrectly,
-                            with full diagnostic information for failure analysis
-  smoke_test.log          — Complete structured log (DEBUG level)
+  results.json                — Per-question results; EvaluationEntry-compatible
+                                (question_id, db_id, difficulty, correct, latency_s, …)
+  detailed_traces.json        — Full per-question trace (all intermediate outputs
+                                for every op, per-candidate details, oracle metrics)
+  component_summary.json      — Aggregated metrics per pipeline component
+                                (op5/op6/op7/op8/op8_verification/op9 statistics)
+  op8_verification_report.json— Per-question Op8 detail: verification plan, per-candidate
+                                iteration traces (exec + verif state at every fix iteration),
+                                feedback sent to the fix LLM, and calibration metrics.
+  failed_questions.json       — Only the questions that were answered incorrectly,
+                                with full diagnostic information for failure analysis
+  smoke_test.log              — Complete structured log (DEBUG level)
 
 Usage:
   python scripts/run_smoke_test.py
@@ -35,10 +38,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ctypes
+import ctypes.util
 import gc
 import json
 import logging
 import os
+import psutil
 import random
 import re
 import sys
@@ -79,6 +85,36 @@ from src.generation.standard_generator import StandardAndComplexGenerator
 from src.generation.icl_generator import ICLGenerator
 from src.fixing.query_fixer import QueryFixer, _categorize_error
 from src.selection.adaptive_selector import AdaptiveSelector
+
+
+# ---------------------------------------------------------------------------
+# Memory helpers
+# ---------------------------------------------------------------------------
+
+def _malloc_trim() -> None:
+    """Ask the C allocator to return freed memory pages to the OS."""
+    try:
+        if sys.platform == "darwin":
+            libc = ctypes.CDLL("libc.dylib", use_errno=True)
+            fn = libc.malloc_zone_pressure_relief
+            fn.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+            fn.restype = ctypes.c_size_t
+            fn(None, 0)
+        else:
+            libc_name = ctypes.util.find_library("c") or "libc.so.6"
+            libc = ctypes.CDLL(libc_name, use_errno=True)
+            libc.malloc_trim(ctypes.c_size_t(0))
+    except Exception:
+        pass  # non-critical
+
+
+def _mem_mib(label: str) -> float:
+    """Log and return the process RSS in MiB at the given checkpoint label."""
+    rss_bytes = psutil.Process().memory_info().rss
+    rss_mib = rss_bytes / (1024 ** 2)
+    print(f"  [MEM] {label}: {rss_mib:.1f} MiB RSS", flush=True)
+    return rss_mib
+
 
 # ---------------------------------------------------------------------------
 # Per-stage timeouts.  Generator timeouts are read from settings so that
@@ -256,7 +292,22 @@ def results_match(rows_a: list, rows_b: list) -> bool:
 _ALIAS_RE = re.compile(r"^[a-z]\d*$", re.IGNORECASE)
 
 
-def _extract_required_tables_columns(gold_sql: str) -> tuple[set, set]:
+def _get_real_table_names(db_path: str) -> set[str]:
+    """Return lowercased real table names from sqlite_master. Returns empty set on error."""
+    try:
+        import sqlite3
+        con = sqlite3.connect(db_path)
+        cur = con.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        names = {row[0].lower() for row in cur.fetchall()}
+        con.close()
+        return names
+    except Exception:
+        return set()  # fail open — don't filter if DB is unavailable
+
+
+def _extract_required_tables_columns(
+    gold_sql: str, real_table_names: set[str] | None = None
+) -> tuple[set, set]:
     tables: set[str] = set()
     for m in re.finditer(r"(?:FROM|JOIN)\s+(\w+)", gold_sql, re.IGNORECASE):
         name = m.group(1).lower()
@@ -273,11 +324,17 @@ def _extract_required_tables_columns(gold_sql: str) -> tuple[set, set]:
         if not _ALIAS_RE.match(t_name):
             tables.add(t_name)
 
+    # Filter out CTE aliases and other non-real table names (e.g. MaxBanned, MB)
+    if real_table_names is not None:
+        tables = {t for t in tables if t in real_table_names}
+        table_cols = {(t, c) for t, c in table_cols if t in real_table_names}
+
     return tables, table_cols
 
 
-def _compute_schema_recall(s1_ddl, s2_ddl, s1_fields, s2_fields, gold_sql) -> dict:
-    required_tables, required_cols = _extract_required_tables_columns(gold_sql)
+def _compute_schema_recall(s1_ddl, s2_ddl, s1_fields, s2_fields, gold_sql, db_path=None) -> dict:
+    real_table_names = _get_real_table_names(db_path) if db_path else None
+    required_tables, required_cols = _extract_required_tables_columns(gold_sql, real_table_names)
     s1_ddl_lower = (s1_ddl or "").lower()
     s2_ddl_lower = (s2_ddl or "").lower()
 
@@ -536,6 +593,7 @@ async def _ops_5_6_body(
             linked_schemas.s1_fields,
             linked_schemas.s2_fields,
             gold_sql,
+            db_path=db_path,
         )
         recall = op6["schema_recall"]
         logger.info(
@@ -563,7 +621,7 @@ async def _ops_5_6_body(
         )
         op6["schema_recall"] = _compute_schema_recall(
             linked_schemas.s1_ddl, linked_schemas.s2_ddl,
-            [], [], gold_sql,
+            [], [], gold_sql, db_path=db_path,
         )
     except Exception as exc:
         op6["error"] = f"{type(exc).__name__}: {exc}"
@@ -581,7 +639,7 @@ async def _ops_5_6_body(
         )
         op6["schema_recall"] = _compute_schema_recall(
             linked_schemas.s1_ddl, linked_schemas.s2_ddl,
-            [], [], gold_sql,
+            [], [], gold_sql, db_path=db_path,
         )
         if not await _check_mlx_server():
             logger.critical(
@@ -789,7 +847,7 @@ async def _ops_7_9_body(
 
     if all_candidates:
         try:
-            fixer = QueryFixer()
+            fixer = QueryFixer(trace=True)
             fixed_candidates = await asyncio.wait_for(
                 fixer.fix_candidates(
                     candidates=all_candidates,
@@ -860,6 +918,173 @@ async def _ops_7_9_body(
                     needed_fix, fixed_ok, still_failing,
                     post_correct, len(fixed_candidates),
                 )
+
+            # ------------------------------------------------------------------
+            # Build detailed Op8 verification trace (written to op8_verification_report.json)
+            # ------------------------------------------------------------------
+            verif_plan_specs = fixer.last_verif_specs
+            candidate_details = []
+            test_type_fire_counts: Counter = Counter()
+            test_type_fail_counts: Counter = Counter()
+            for fc in fixed_candidates:
+                is_oracle_correct = (
+                    gold_exec.success
+                    and fc.execution_result.success
+                    and results_match(fc.execution_result.rows, gold_exec.rows)
+                )
+                # Determine if the loop broke early (no fix on the last pre-final iteration)
+                broke_early = fc.fix_iterations == 0 and (
+                    not fc.iteration_trace
+                    or fc.iteration_trace[0].get("verif_all_pass") is not False
+                    or fc.iteration_trace[0].get("exec_success", False)
+                )
+                for entry in fc.iteration_trace:
+                    for r in (entry.get("verif_results") or []):
+                        test_type_fire_counts[r["test_type"]] += 1
+                        if r["status"] == "fail":
+                            test_type_fail_counts[r["test_type"]] += 1
+
+                final_verif = fc.verification_results
+                cand_detail: dict = {
+                    "generator_id": fc.generator_id,
+                    "is_oracle_correct": is_oracle_correct,
+                    "final_fix_iterations": fc.fix_iterations,
+                    "final_confidence": round(fc.confidence_score, 4),
+                    "broke_early": fc.fix_iterations == 0,
+                    "iterations": fc.iteration_trace,
+                    "final_exec_success": fc.execution_result.success,
+                    "final_exec_is_empty": fc.execution_result.is_empty,
+                    "final_exec_row_count": (
+                        len(fc.execution_result.rows)
+                        if fc.execution_result.success else None
+                    ),
+                    "final_verif_all_pass": (
+                        final_verif.all_pass if final_verif else None
+                    ),
+                    "final_verif_confidence_adjustment": (
+                        round(final_verif.confidence_adjustment, 4)
+                        if final_verif else None
+                    ),
+                    "final_verif_test_results": (
+                        [
+                            {
+                                "test_type": r.test_type,
+                                "status": r.status,
+                                "actual_outcome": r.actual_outcome,
+                                "is_critical": r.is_critical,
+                            }
+                            for r in final_verif.test_results
+                        ]
+                        if final_verif else None
+                    ),
+                }
+
+                # ── Per-iteration oracle evaluation + transition tracking ──────
+                # Requires full SQL in iteration trace (sql_full added by query_fixer.py).
+                # Only meaningful when gold execution succeeded.
+                oracle_per_iter: list = []
+                oracle_transitions: list = []
+                verif_issues_fixed_by_iter: list = []  # fail→pass test types per iter
+
+                if gold_exec.success and fc.iteration_trace:
+                    prev_iter_verif: dict = {}  # test_type → status at previous iter
+                    prev_oracle = None
+
+                    for idx, it_entry in enumerate(fc.iteration_trace):
+                        sql_full = it_entry.get("sql_full") or it_entry.get("sql", "")
+                        iter_oracle = None
+                        if sql_full and it_entry.get("exec_success"):
+                            try:
+                                iter_exec = execute_sql(db_path, sql_full)
+                                if iter_exec.success:
+                                    iter_oracle = results_match(iter_exec.rows, gold_exec.rows)
+                            except Exception:
+                                iter_oracle = None
+                        oracle_per_iter.append(iter_oracle)
+
+                        # Which test types went fail→pass compared to the previous iteration?
+                        curr_verif: dict = {
+                            r["test_type"]: r["status"]
+                            for r in (it_entry.get("verif_results") or [])
+                        }
+                        fixed_this_iter = [
+                            tt for tt, status in curr_verif.items()
+                            if status == "pass" and prev_iter_verif.get(tt) == "fail"
+                        ]
+                        verif_issues_fixed_by_iter.append(fixed_this_iter)
+
+                        # Oracle transition: previous iter triggered a fix AND SQL changed
+                        if (
+                            idx > 0
+                            and prev_oracle is not None
+                            and iter_oracle is not None
+                            and iter_oracle != prev_oracle
+                            and fc.iteration_trace[idx - 1].get("fix_triggered")
+                            and it_entry.get("sql_changed_from_previous")
+                        ):
+                            failing_in_prev = [
+                                r["test_type"]
+                                for r in (fc.iteration_trace[idx - 1].get("verif_results") or [])
+                                if r["status"] == "fail"
+                            ]
+                            oracle_transitions.append({
+                                "iteration": idx,
+                                "direction": "wrong_to_correct" if iter_oracle else "correct_to_wrong",
+                                "verif_issues_triggered": failing_in_prev,
+                            })
+
+                        prev_oracle = iter_oracle
+                        prev_iter_verif = curr_verif
+
+                cand_detail["oracle_per_iteration"] = oracle_per_iter
+                cand_detail["oracle_transitions"] = oracle_transitions
+                cand_detail["verif_issues_fixed_by_iter"] = verif_issues_fixed_by_iter
+                # ─────────────────────────────────────────────────────────────
+
+                candidate_details.append(cand_detail)
+
+            op8_detail: dict = {
+                "question_id": entry.get("question_id") if False else trace.get("question_id"),
+                "question": question,
+                "db_id": db_id,
+                "difficulty": entry.get("difficulty") if False else trace.get("difficulty"),
+                "correct": trace.get("correct", False),          # filled in later by eval
+                "oracle_post_fix": op8.get("oracle_post_fix", False),
+                # Verification plan
+                "verif_plan_count": len(verif_plan_specs),
+                "verif_plan_error": None,
+                "verif_plan": [
+                    {
+                        "test_type": s.test_type,
+                        "description": s.description,
+                        "is_critical": s.is_critical,
+                        "fix_hint": s.fix_hint,
+                        "has_verification_sql": bool(s.verification_sql),
+                        "required_sql_keywords": s.required_sql_keywords,
+                        "check_columns": s.check_columns,
+                    }
+                    for s in verif_plan_specs
+                ],
+                # Per-candidate
+                "candidates": candidate_details,
+                # Per-question aggregates
+                "summary": {
+                    "total_candidates": len(fixed_candidates),
+                    "candidates_needing_fix": needed_fix,
+                    "candidates_fixed_ok": fixed_ok,
+                    "candidates_early_break": sum(
+                        1 for fc in fixed_candidates if fc.fix_iterations == 0
+                    ),
+                    "candidates_verif_all_pass_final": sum(
+                        1 for fc in fixed_candidates
+                        if fc.verification_results is not None
+                        and fc.verification_results.all_pass
+                    ),
+                    "test_type_fire_counts": dict(test_type_fire_counts),
+                    "test_type_fail_counts": dict(test_type_fail_counts),
+                },
+            }
+            trace["op8_detail"] = op8_detail
 
         except asyncio.TimeoutError:
             op8["error"] = f"timeout after {_TIMEOUT_FIXING}s"
@@ -1002,6 +1227,10 @@ async def _ops_7_9_body(
     trace["correct"] = eval_info["correct"]
     trace["eval"] = eval_info
 
+    # Backfill op8_detail["correct"] now that we know the eval result
+    if "op8_detail" in trace:
+        trace["op8_detail"]["correct"] = eval_info["correct"]
+
     # Total latency
     trace["latency_s"] = round(time.monotonic() - t_total_start, 3)
 
@@ -1106,6 +1335,145 @@ def compute_component_summary(traces: list[dict]) -> dict:
         "error_rate": sum(1 for o in op8_traces if o.get("error")) / n,
     }
 
+    # ---- Op8 Verification (from op8_detail, populated when trace=True) ----
+    op8_details = [t["op8_detail"] for t in traces if "op8_detail" in t]
+    op8_verif_summary: dict = {}
+    if op8_details:
+        nd = len(op8_details)
+
+        # Accumulate test-type counters across all questions × candidates × iterations
+        tt_fire: Counter = Counter()   # evaluations run per test type
+        tt_fail: Counter = Counter()   # evaluations that failed per test type
+        tt_fix_trigger: Counter = Counter()  # failures that triggered a fix
+
+        total_cands = 0
+        early_break_count = 0
+        one_fix_count = 0
+        two_fix_count = 0
+
+        fix_changed_total = 0      # fix was triggered and produced different SQL
+        fix_triggered_total = 0    # fix was triggered (regardless of SQL change)
+        verif_improved_count = 0   # verif status went from fail→pass after fix
+        verif_fail_oracle_correct = 0  # verif said FAIL but candidate was oracle-correct
+        verif_pass_oracle_wrong = 0    # verif said PASS but candidate was oracle-wrong
+
+        # New: verification issue fix effectiveness + oracle transition tracking
+        verif_issues_fixed_counts: Counter = Counter()  # test_type → fail→pass count
+        wrong_to_correct_count = 0   # fix events where candidate went wrong→correct
+        correct_to_wrong_count = 0   # fix events where candidate went correct→wrong
+        issues_triggering_correct_trans: Counter = Counter()  # test_type → count
+        issues_triggering_wrong_trans: Counter = Counter()    # test_type → count
+
+        for detail in op8_details:
+            for cand in detail.get("candidates", []):
+                total_cands += 1
+                fi = cand.get("final_fix_iterations", 0)
+                if fi == 0:
+                    early_break_count += 1
+                elif fi == 1:
+                    one_fix_count += 1
+                else:
+                    two_fix_count += 1
+
+                is_oracle = cand.get("is_oracle_correct", False)
+                final_verif_pass = cand.get("final_verif_all_pass")
+
+                if final_verif_pass is False and is_oracle:
+                    verif_fail_oracle_correct += 1
+                if final_verif_pass is True and not is_oracle:
+                    verif_pass_oracle_wrong += 1
+
+                iters = cand.get("iterations", [])
+                prev_verif_all_pass = None
+                for it_entry in iters:
+                    for r in (it_entry.get("verif_results") or []):
+                        tt_fire[r["test_type"]] += 1
+                        if r["status"] == "fail":
+                            tt_fail[r["test_type"]] += 1
+
+                    if it_entry.get("fix_triggered"):
+                        fix_triggered_total += 1
+                        changed = it_entry.get("fix_produced_different_sql")
+                        if changed:
+                            fix_changed_total += 1
+                        # Check if verif improved between this iter and next
+                        if prev_verif_all_pass is False and it_entry.get("verif_all_pass") is True:
+                            verif_improved_count += 1
+                        for r in (it_entry.get("verif_results") or []):
+                            if r["status"] == "fail":
+                                tt_fix_trigger[r["test_type"]] += 1
+
+                    prev_verif_all_pass = it_entry.get("verif_all_pass")
+
+                # Accumulate verif fail→pass fixes from per-candidate detail
+                for fixed_list in cand.get("verif_issues_fixed_by_iter", []):
+                    verif_issues_fixed_counts.update(fixed_list)
+
+                # Accumulate oracle transitions
+                for transition in cand.get("oracle_transitions", []):
+                    direction = transition.get("direction", "")
+                    triggering = transition.get("verif_issues_triggered", [])
+                    if direction == "wrong_to_correct":
+                        wrong_to_correct_count += 1
+                        issues_triggering_correct_trans.update(triggering)
+                    elif direction == "correct_to_wrong":
+                        correct_to_wrong_count += 1
+                        issues_triggering_wrong_trans.update(triggering)
+
+        all_types = sorted(set(list(tt_fire.keys()) + list(tt_fail.keys())))
+        op8_verif_summary = {
+            "questions_with_detail": nd,
+            "avg_plan_test_count": round(
+                sum(d.get("verif_plan_count", 0) for d in op8_details) / nd, 2
+            ),
+            "questions_with_plan": sum(
+                1 for d in op8_details if d.get("verif_plan_count", 0) > 0
+            ),
+            "questions_with_plan_error": sum(
+                1 for d in op8_details if d.get("verif_plan_error")
+            ),
+            # Per-test-type breakdown
+            "test_type_fire_counts": dict(tt_fire),
+            "test_type_fail_counts": dict(tt_fail),
+            "test_type_fix_trigger_counts": dict(tt_fix_trigger),
+            "test_type_fail_rate": {
+                tt: round(tt_fail[tt] / tt_fire[tt], 3) if tt_fire[tt] > 0 else 0.0
+                for tt in all_types
+            },
+            "test_type_fix_trigger_rate": {
+                tt: round(tt_fix_trigger[tt] / tt_fail[tt], 3) if tt_fail[tt] > 0 else 0.0
+                for tt in all_types
+            },
+            # Calibration
+            "verif_fail_but_oracle_correct_rate": round(
+                verif_fail_oracle_correct / total_cands, 3
+            ) if total_cands > 0 else 0.0,
+            "verif_pass_but_oracle_wrong_rate": round(
+                verif_pass_oracle_wrong / total_cands, 3
+            ) if total_cands > 0 else 0.0,
+            # Fix effectiveness
+            "fix_changed_sql_rate": round(
+                fix_changed_total / fix_triggered_total, 3
+            ) if fix_triggered_total > 0 else 0.0,
+            "fix_improved_verif_rate": round(
+                verif_improved_count / fix_triggered_total, 3
+            ) if fix_triggered_total > 0 else 0.0,
+            # Iteration distribution (over candidates)
+            "early_break_rate": round(early_break_count / total_cands, 3) if total_cands > 0 else 0.0,
+            "one_fix_rate": round(one_fix_count / total_cands, 3) if total_cands > 0 else 0.0,
+            "two_fix_rate": round(two_fix_count / total_cands, 3) if total_cands > 0 else 0.0,
+            # Verification issue fix effectiveness
+            # How many verification tests actually transitioned fail→pass after a fix
+            "verif_issues_actually_fixed_counts": dict(verif_issues_fixed_counts),
+            # Oracle-level impact of fix iterations (per candidate, not per question)
+            "wrong_to_correct_count": wrong_to_correct_count,
+            "correct_to_wrong_count": correct_to_wrong_count,
+            "net_fix_oracle_impact": wrong_to_correct_count - correct_to_wrong_count,
+            # Which verification issue types were present in fixes that caused transitions
+            "issues_triggering_correct_trans": dict(issues_triggering_correct_trans),
+            "issues_triggering_wrong_trans": dict(issues_triggering_wrong_trans),
+        }
+
     # ---- Op9 ----
     op9_traces = [t.get("op9", {}) for t in traces]
     method_counts: Counter = Counter(o.get("method", "error") for o in op9_traces)
@@ -1152,6 +1520,7 @@ def compute_component_summary(traces: list[dict]) -> dict:
         "op6": op6_summary,
         "op7": op7_summary,
         "op8": op8_summary,
+        "op8_verification": op8_verif_summary,
         "op9": op9_summary,
         "oracle": oracle_summary,
         "total_latency_s": sum(t.get("latency_s", 0) for t in traces),
@@ -1223,6 +1592,7 @@ async def main(args: argparse.Namespace) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     _setup_logging(output_dir, level=args.log_level)
 
+    _mem_mib("startup baseline (imports + model loading done)")
     logger.info("=" * 70)
     logger.info("NL2SQL Smoke Test — 66 Questions (6 per DB × 11 databases)")
     logger.info("=" * 70)
@@ -1313,8 +1683,11 @@ async def main(args: argparse.Namespace) -> None:
 
         # Load artifacts for this DB only
         logger.info("  [%s] Loading artifacts for %d question(s) …", db_id, len(db_questions))
+        mem_before_load = _mem_mib(f"{db_id} before loading artifacts")
         try:
             artifacts = load_artifacts(db_id)
+            mem_after_load = _mem_mib(f"{db_id} after loading artifacts (FAISS: {len(artifacts['faiss_index']._fields)} fields)")
+            print(f"  [{db_id}] artifacts loaded — index memory added: {mem_after_load - mem_before_load:+.1f} MiB")
             logger.info(
                 "  [%s] artifacts loaded (FAISS: %d fields, LSH ready)",
                 db_id,
@@ -1347,9 +1720,17 @@ async def main(args: argparse.Namespace) -> None:
         phase1_results = await asyncio.gather(*phase1_tasks, return_exceptions=True)
 
         # ── FREE INDICES: LSH and FAISS not needed for Op 7-9 ────────────────
+        mem_before_free = _mem_mib(f"{db_id} before freeing indexes")
         artifacts["lsh_index"] = None
         artifacts["faiss_index"] = None
         gc.collect()
+        _malloc_trim()
+        mem_after_free = _mem_mib(f"{db_id} after freeing indexes + gc.collect() + malloc_trim")
+        print(
+            f"  [{db_id}] Index memory freed: {mem_after_free - mem_before_free:+.1f} MiB "
+            f"(before={mem_before_free:.1f}, after={mem_after_free:.1f}). "
+            f"Phase 2: SQL generation + selection …"
+        )
         logger.info("  [%s] LSH + FAISS freed after Op 5-6.", db_id)
 
         # ── PHASE 2: Op 7-9 for ALL questions (LLM-only) ─────────────────────
@@ -1407,6 +1788,8 @@ async def main(args: argparse.Namespace) -> None:
         # Free remaining artifacts before loading the next DB
         del artifacts
         gc.collect()
+        _malloc_trim()
+        mem_end = _mem_mib(f"{db_id} after Phase 2 complete + final gc")
         logger.info("  [%s] Done. All memory released.", db_id)
 
     print()  # newline after progress indicator
@@ -1453,17 +1836,31 @@ async def main(args: argparse.Namespace) -> None:
         json.dump(failed, f, ensure_ascii=False, indent=2)
 
     # -----------------------------------------------------------------------
+    # Save Op8 verification report
+    # -----------------------------------------------------------------------
+    op8_report = [
+        t["op8_detail"]
+        for t in completed_traces
+        if "op8_detail" in t
+    ]
+    op8_report_path = output_dir / "op8_verification_report.json"
+    with open(op8_report_path, "w", encoding="utf-8") as f:
+        json.dump(op8_report, f, ensure_ascii=False, indent=2)
+    logger.info("Op8 verification report: %d questions", len(op8_report))
+
+    # -----------------------------------------------------------------------
     # Print final summary
     # -----------------------------------------------------------------------
     _print_final_summary(summary, output_dir)
 
     logger.info("=" * 70)
     logger.info("Smoke test complete. Output files:")
-    logger.info("  results.json          → %s", results_path)
-    logger.info("  detailed_traces.json  → %s", traces_path)
-    logger.info("  component_summary.json→ %s", summary_path)
-    logger.info("  failed_questions.json → %s", failed_path)
-    logger.info("  smoke_test.log        → %s", output_dir / "smoke_test.log")
+    logger.info("  results.json                 → %s", results_path)
+    logger.info("  detailed_traces.json         → %s", traces_path)
+    logger.info("  component_summary.json       → %s", summary_path)
+    logger.info("  op8_verification_report.json → %s", op8_report_path)
+    logger.info("  failed_questions.json        → %s", failed_path)
+    logger.info("  smoke_test.log               → %s", output_dir / "smoke_test.log")
     logger.info(
         "\nTo analyze results: python scripts/analyze_results.py %s", results_path
     )
