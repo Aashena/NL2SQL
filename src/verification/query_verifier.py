@@ -14,14 +14,14 @@ QueryVerifier has two responsibilities:
 Test types:
 
   Cheap (no LLM cost):
-    grain         — result row count matches expected entity count
-    null          — result rows contain no unexpected NULL values
-    duplicate     — JOIN did not multiply rows beyond expected distinct count
-    ordering      — "top N / highest / ranked" questions have ORDER BY + LIMIT
-    scale         — numeric result values are within expected range
+    grain            — result row count matches expected entity count
+    null             — result rows contain no unexpected NULL values
+    duplicate        — JOIN did not multiply rows beyond expected distinct count
+    ordering         — "top N / highest / ranked" questions have ORDER BY + LIMIT
+    scale            — numeric result values are within expected range
+    column_alignment — SELECT column count matches expected_column_count
 
   Expensive (1 LLM call each, run every iteration):
-    column_alignment — SELECT columns actually answer the question
     boundary         — date/time constraints match the question's period
     symmetry         — aggregate total matches sum of sub-groups
 """
@@ -50,10 +50,10 @@ _BONUS_ALL_PASS = 0.2      # bonus when ALL applicable tests pass (capped)
 _MAX_BONUS = 0.2
 
 _CHEAP_TESTS = frozenset({
-    "grain", "null", "duplicate", "ordering", "scale"
+    "grain", "null", "duplicate", "ordering", "scale", "column_alignment"
 })
 _EXPENSIVE_TESTS = frozenset({
-    "column_alignment", "boundary", "symmetry"
+    "boundary", "symmetry"
 })
 _ALL_TEST_TYPES = _CHEAP_TESTS | _EXPENSIVE_TESTS
 
@@ -89,7 +89,8 @@ class VerificationTestSpec(BaseModel):
     row_count_max: Optional[int] = None
     """For grain test: static integer upper bound when no bounding SQL is available."""
     expected_column_count: Optional[int] = None
-    """For grain test: expected number of output columns.
+    """For column_alignment test (canonical) or grain test (legacy):
+    expected number of output columns.
     1 for scalar/aggregate results, 2+ for multi-column outputs."""
     numeric_min: Optional[float] = None
     """For scale test: minimum expected value for numeric result columns."""
@@ -129,7 +130,7 @@ _PLAN_TOOL = ToolParam(
     name="verification_plan",
     description=(
         "Generate a list of semantic verification tests for the given SQL question. "
-        "Only include tests that are genuinely applicable to this specific question."
+        "Always include grain and column_alignment. Add others only when explicitly applicable."
     ),
     input_schema={
         "type": "object",
@@ -178,9 +179,11 @@ _PLAN_TOOL = ToolParam(
                         "expected_column_count": {
                             "type": "integer",
                             "description": (
-                                "For grain test: expected number of output columns. "
-                                "1 for scalar/aggregate results, 2+ for multi-column outputs. "
-                                "Omit if unsure."
+                                "For column_alignment test: the exact number of columns the correct "
+                                "answer must have. 1 for scalar/aggregate questions ('how many', "
+                                "'what is the average', 'what is the name of'), 2 for name+value "
+                                "pairs ('list the name and score of...'), N for explicit multi-column "
+                                "outputs. Must be set when test_type is column_alignment."
                             ),
                         },
                         "check_columns": {
@@ -210,7 +213,7 @@ _PLAN_TOOL = ToolParam(
                             "type": "boolean",
                             "description": (
                                 "True for logical errors (grain, duplicate, column_alignment). "
-                                "False for style/quality issues."
+                                "False for style/quality issues (null, ordering, scale, boundary, symmetry)."
                             ),
                         },
                     },
@@ -237,9 +240,6 @@ _PLAN_SYSTEM = CacheableText(
         "rows (e.g. SELECT COUNT(DISTINCT id) FROM students). This runs against the raw DB.\n"
         "  - Set row_count_min only if you are certain at least N>1 rows must exist; "
         "otherwise leave it unset (default is 1 — empty results are always wrong).\n"
-        "  - Set expected_column_count: 1 for scalar/aggregate ('how many', 'what is "
-        "the average'), 2 for name+value pairs, more for explicit multi-column outputs. "
-        "Omit if unsure.\n"
         "  - Mark is_critical=true.\n\n"
         "null: If key output columns should not be NULL (e.g. names, IDs), list "
         "those column names in check_columns. Mark is_critical=false.\n\n"
@@ -251,16 +251,24 @@ _PLAN_SYSTEM = CacheableText(
         "Mark is_critical=false.\n\n"
         "scale: If numeric values have known bounds (percentages: 0-100, ages: "
         "0-120, ratings: 0-5), set numeric_min and numeric_max. Mark is_critical=false.\n\n"
-        "column_alignment: Always include this to verify SELECT columns answer the "
-        "question. This is LLM-judged. Mark is_critical=true.\n\n"
+        "column_alignment: Always include this to verify the number of SELECT columns "
+        "matches what the question requires. Set expected_column_count to the exact number "
+        "a correct answer must produce:\n"
+        "  - 1 for scalar/aggregate answers ('how many', 'what is the average', "
+        "'what is the name of the ...')\n"
+        "  - 2 for name+value pairs ('list the name and GPA of each student')\n"
+        "  - N for explicitly multi-column outputs ('return the id, name, and score')\n"
+        "This is a cheap structural check — no LLM call. Mark is_critical=true.\n\n"
         "boundary: Only include if the question mentions specific dates, years, or "
         "time periods. Mark is_critical=false.\n\n"
         "symmetry: Only include if the question asks for a total that should equal "
         "the sum of sub-groups (e.g. 'total = active + inactive'). Generate a "
         "verification_sql for the sub-total check. Mark is_critical=false.\n\n"
         "RULES:\n"
-        "- Include 2-5 tests maximum. Quality over quantity.\n"
-        "- Only include tests that are genuinely applicable to THIS question.\n"
+        "- ALWAYS include grain and column_alignment — these apply to every NL2SQL question.\n"
+        "  For column_alignment: you MUST set expected_column_count.\n"
+        "- Additionally include null, ordering, scale, boundary, or symmetry ONLY when explicitly applicable.\n"
+        "- 2-6 tests total. grain + column_alignment are mandatory.\n"
         "- verification_sql must be valid SQLite querying the raw database tables.\n"
         "- fix_hint must be concrete and mention specific SQL clauses to add/change.\n"
     ),
@@ -290,6 +298,32 @@ class QueryVerifier:
         )
     """
 
+    @staticmethod
+    def _default_plan() -> list[VerificationTestSpec]:
+        """Fallback plan when LLM returns empty: always grain + column_alignment."""
+        return [
+            VerificationTestSpec(
+                test_type="grain",
+                description="Result must have at least 1 row and plausible cardinality.",
+                verification_sql_upper=None,
+                row_count_min=1,
+                expected_outcome="At least 1 row returned with correct cardinality.",
+                fix_hint="Ensure the query returns rows. Check WHERE clause, JOINs, and GROUP BY.",
+                is_critical=True,
+            ),
+            VerificationTestSpec(
+                test_type="column_alignment",
+                description="SELECT columns must match what the question asked for.",
+                expected_column_count=1,
+                expected_outcome="Correct number of columns returned for this question type.",
+                fix_hint=(
+                    "Adjust SELECT to return exactly the columns the question asks for. "
+                    "For scalar questions, return 1 column; for name+value pairs, 2 columns."
+                ),
+                is_critical=True,
+            ),
+        ]
+
     async def generate_plan(
         self,
         question: str,
@@ -299,8 +333,8 @@ class QueryVerifier:
         """
         Generate applicable verification tests for this question.
 
-        Makes exactly 1 LLM call (model_powerful). Returns an empty list on any
-        failure — verification is optional and never blocks the fix loop.
+        Makes exactly 1 LLM call (model_powerful). Falls back to a default
+        grain + column_alignment plan if the LLM returns empty or fails.
         """
         q = sanitize_prompt_text(question)
         ev = sanitize_prompt_text(evidence or "None")
@@ -325,8 +359,8 @@ class QueryVerifier:
                 max_tokens=1500,
             )
             if not response.tool_inputs:
-                logger.warning("Verification plan LLM returned no tool inputs")
-                return []
+                logger.warning("Verification plan LLM returned no tool inputs — using default plan")
+                return self._default_plan()
             raw_tests = response.tool_inputs[0].get("tests", [])
             specs: list[VerificationTestSpec] = []
             for t in raw_tests:
@@ -338,13 +372,19 @@ class QueryVerifier:
                         logger.warning("Unknown test_type %r in plan — skipped", spec.test_type)
                 except Exception as e:
                     logger.warning("Failed to parse VerificationTestSpec: %s", e)
+            if not specs:
+                logger.info(
+                    "Verification plan empty for question %.60r — using default plan",
+                    question,
+                )
+                return self._default_plan()
             return specs
         except LLMError as exc:
-            logger.warning("Verification plan generation failed (LLMError): %s", exc)
-            return []
+            logger.warning("Verification plan generation failed (LLMError): %s — using default plan", exc)
+            return self._default_plan()
         except Exception as exc:
-            logger.warning("Unexpected error in generate_plan: %s", exc)
-            return []
+            logger.warning("Unexpected error in generate_plan: %s — using default plan", exc)
+            return self._default_plan()
 
     async def evaluate_candidate(
         self,
@@ -783,77 +823,50 @@ class QueryVerifier:
         sql: str,
         exec_result: ExecutionResult,
     ) -> VerificationTestResult:
-        """Column alignment: LLM judges whether SELECT columns answer the question.
+        """Column alignment: structural check that actual column count matches expected.
 
-        This is an expensive test — makes 1 LLM call (model_fast).
-        Runs on every fix iteration (run_expensive is always True in QueryFixer).
+        Cheap test — no LLM call. Compares len(exec_result.rows[0]) to
+        spec.expected_column_count. Returns 'skip' if expected_column_count
+        is not set or if there are no rows.
         """
-        logger.debug("Running expensive test: column_alignment")
-        select_match = re.search(
-            r"SELECT\s+(.*?)\s+FROM\b",
-            sql,
-            re.IGNORECASE | re.DOTALL,
-        )
-        select_clause = select_match.group(1).strip() if select_match else sql[:200]
-        sample_row = str(exec_result.rows[0]) if exec_result.rows else "(empty result)"
+        logger.debug("Running cheap structural test: column_alignment")
 
-        prompt = (
-            f"Verification: Column Alignment Check\n"
-            f"Description: {spec.description}\n\n"
-            f"SELECT clause: {select_clause}\n"
-            f"Sample result row: {sample_row}\n\n"
-            f"Expected outcome: {spec.expected_outcome}\n\n"
-            "Do the selected columns actually answer the question? "
-            "Reply with exactly 'PASS' or 'FAIL' on the first line, then a brief explanation."
-        )
-
-        try:
-            client = get_client()
-            response = await client.generate(
-                model=settings.model_fast,
-                system=[CacheableText(text="You are an SQL quality analyst.", cache=False)],
-                messages=[{"role": "user", "content": prompt}],
-                tools=[],
-                temperature=0.0,
-                max_tokens=200,
-            )
-            judgment = (response.text or "").strip().upper()
-            if judgment.startswith("PASS"):
-                logger.debug("column_alignment: PASS — %s", (response.text or "")[:100])
-                return VerificationTestResult(
-                    test_type="column_alignment",
-                    status="pass",
-                    actual_outcome=f"LLM judgment: {(response.text or '')[:200]}",
-                    is_critical=spec.is_critical,
-                )
-            elif judgment.startswith("FAIL"):
-                logger.info(
-                    "column_alignment: FAIL — %s", (response.text or "")[:200]
-                )
-                return VerificationTestResult(
-                    test_type="column_alignment",
-                    status="fail",
-                    actual_outcome=f"LLM judgment: {(response.text or '')[:200]}",
-                    is_critical=spec.is_critical,
-                )
-            logger.warning(
-                "column_alignment: inconclusive LLM response — %s",
-                (response.text or "")[:100],
-            )
+        if spec.expected_column_count is None:
             return VerificationTestResult(
                 test_type="column_alignment",
                 status="skip",
-                actual_outcome=f"Inconclusive LLM response: {(response.text or '')[:100]}",
+                actual_outcome="expected_column_count not set — cannot verify column count.",
                 is_critical=spec.is_critical,
             )
-        except LLMError as exc:
-            logger.warning("column_alignment LLM call failed: %s", exc)
+
+        if not exec_result.rows:
             return VerificationTestResult(
                 test_type="column_alignment",
-                status="error",
-                actual_outcome=f"LLM error: {exc}",
+                status="skip",
+                actual_outcome="No rows returned — column count cannot be checked.",
                 is_critical=spec.is_critical,
             )
+
+        actual = len(exec_result.rows[0])
+        expected = spec.expected_column_count
+
+        if actual == expected:
+            return VerificationTestResult(
+                test_type="column_alignment",
+                status="pass",
+                actual_outcome=f"Column count {actual} matches expected {expected}.",
+                is_critical=spec.is_critical,
+            )
+
+        return VerificationTestResult(
+            test_type="column_alignment",
+            status="fail",
+            actual_outcome=(
+                f"Column count {actual} does not match expected {expected}. "
+                "SELECT list may include extra or missing columns."
+            ),
+            is_critical=spec.is_critical,
+        )
 
     async def _eval_boundary(
         self,
@@ -873,13 +886,58 @@ class QueryVerifier:
         )
         where_clause = where_match.group(1).strip() if where_match else "(no WHERE clause)"
 
+        # Structural pre-check: if the SQL contains any date/time construct,
+        # treat the boundary constraint as structurally present.  Only call
+        # the expensive LLM judge when no such construct can be found.
+        _date_pattern = re.compile(
+            r"\b(BETWEEN|STRFTIME|JULIANDAY|DATE|DATETIME|YEAR|MONTH)\b"
+            r"|[><=!]=?\s*['\"]?\d{4}[-/]"  # comparisons like >= '2014-'
+            r"|\bLIKE\s+['\"]%?\d{4}%?['\"]"  # LIKE '2014%'
+            r"|\b\d{4}\s+AND\s+\d{4}\b",  # year BETWEEN 2014 AND 2015
+            re.IGNORECASE,
+        )
+        if _date_pattern.search(sql):
+            logger.debug(
+                "boundary: PASS (structural pre-check — date construct found in SQL)"
+            )
+            return VerificationTestResult(
+                test_type="boundary",
+                status="pass",
+                actual_outcome="Structural pre-check: SQL contains a date/time construct.",
+                is_critical=spec.is_critical,
+            )
+
         prompt = (
-            f"Verification: Boundary/Date Check\n"
-            f"Description: {spec.description}\n\n"
-            f"WHERE clause: {where_clause}\n\n"
+            f"You are an SQL analyst checking whether a SQL query correctly implements"
+            f" a date/time boundary condition.\n\n"
+            f"Boundary requirement: {spec.description}\n"
             f"Expected outcome: {spec.expected_outcome}\n\n"
-            "Do the date/time/boundary conditions match what the question asks for? "
-            "Reply with exactly 'PASS' or 'FAIL' on the first line, then a brief explanation."
+            f"SQL WHERE clause:\n{where_clause}\n\n"
+            "IMPORTANT: Judge SEMANTIC EQUIVALENCE, not syntactic form.\n"
+            "Different SQL expressions can represent the same time period correctly.\n\n"
+            "Examples of EQUIVALENT patterns (all should be judged PASS if they target"
+            " the correct period):\n"
+            "  - '2014-2015' ≡ BETWEEN 2014 AND 2015 ≡ year >= 2014 AND year <= 2015\n"
+            "  - year = 2014 ≡ STRFTIME('%Y', col) = '2014' ≡ col LIKE '2014%'"
+            " ≡ BETWEEN '2014-01-01' AND '2014-12-31'\n"
+            "  - BETWEEN '2014-01-01' AND '2014-06-30' ≡ col >= '2014-01-01'"
+            " AND col < '2014-07-01'\n\n"
+            "PASS if:\n"
+            "  - The WHERE clause correctly captures the intended time period,"
+            " even in a different syntactic form.\n"
+            "  - The year/date range matches what the question requires"
+            " (off-by-one rounding is acceptable).\n"
+            "  - The query uses string patterns (LIKE, prefix match) that are logically"
+            " equivalent to a numeric comparison on the same period.\n\n"
+            "FAIL only if:\n"
+            "  - The WHERE clause filters the WRONG time period"
+            " (e.g., 2013 when 2014 is required).\n"
+            "  - There is NO date/time constraint at all when one is clearly required.\n"
+            "  - The date range has a significant off-by-one error that changes which"
+            " rows are returned (e.g., 2014-01-01 to 2014-12-30 instead of 2014-12-31"
+            " is NOT a fail; 2013-01-01 to 2014-11-30 IS a fail).\n\n"
+            "Reply with exactly 'PASS' or 'FAIL' on the first line,"
+            " then a one-sentence explanation."
         )
 
         try:

@@ -496,12 +496,13 @@ class QueryFixer:
                 instruction = _error_instruction(category, current_result.error)
                 exec_issue_lines.append(instruction)
 
+            # Keep failure_hints for trace storage (human-readable summary)
             verif_issue_lines: list[str] = []
             if verif_eval is not None and not verif_eval.all_pass:
                 verif_issue_lines = verif_eval.failure_hints
 
             # ------------------------------------------------------------------
-            # Build and send fix prompt
+            # Build and send fix prompt (with rich per-test verification context)
             # ------------------------------------------------------------------
             fix_prompt = self._build_fix_prompt(
                 sql=current_sql,
@@ -510,7 +511,9 @@ class QueryFixer:
                 schemas=schemas,
                 cell_matches=cell_matches,
                 exec_issues=exec_issue_lines,
-                verif_issues=verif_issue_lines,
+                verif_eval=verif_eval,
+                verif_specs=verif_specs,
+                exec_result=current_result,
             )
 
             try:
@@ -635,9 +638,24 @@ class QueryFixer:
         schemas: "LinkedSchemas",
         cell_matches: list,
         exec_issues: list[str],
-        verif_issues: list[str],
+        verif_eval: Optional[VerificationEvaluation] = None,
+        verif_specs: Optional[list[VerificationTestSpec]] = None,
+        exec_result: Optional["ExecutionResult"] = None,
     ) -> str:
-        """Build the combined fix prompt with execution and verification feedback."""
+        """Build the combined fix prompt with execution and verification feedback.
+
+        For each failing verification test, includes test-type-specific context:
+          - grain: the verification_sql_upper that computed the row-count bound
+          - column_alignment: expected_column_count (structural column count check)
+          - ordering: required SQL keywords that are missing
+          - scale: numeric_min / numeric_max bounds
+          - null: which columns must not be NULL
+          - all tests: the spec's fix_hint
+
+        When exec_result is provided and the SQL executed successfully, a sample
+        of the first 5 result rows is appended so the fixer can see the structural
+        problem (e.g. duplicate join rows for grain failures).
+        """
         cell_match_lines: list[str] = []
         for cm in cell_matches:
             cell_match_lines.append(
@@ -652,16 +670,91 @@ class QueryFixer:
             issues_block_parts.append(
                 "[Execution Error]\n" + "\n".join(f"  {line}" for line in exec_issues)
             )
-        if verif_issues:
-            issues_block_parts.append(
-                "[Verification Issues]\n" + "\n".join(f"  - {h}" for h in verif_issues)
-            )
+
+        # Build rich per-test verification context
+        if verif_eval is not None and not verif_eval.all_pass:
+            spec_by_type: dict[str, VerificationTestSpec] = {}
+            if verif_specs:
+                for spec in verif_specs:
+                    spec_by_type[spec.test_type] = spec
+
+            verif_blocks: list[str] = []
+            for result in verif_eval.test_results:
+                if result.status != "fail":
+                    continue
+                severity = "critical" if result.is_critical else "minor"
+                lines: list[str] = [
+                    f"  ── {result.test_type.upper()} TEST FAILED ({severity}) ──",
+                    f"  Observed: {result.actual_outcome}",
+                ]
+                spec = spec_by_type.get(result.test_type)
+                if spec is not None:
+                    if result.test_type == "grain":
+                        if spec.verification_sql_upper:
+                            lines.append(
+                                f"  Upper bound computed by:\n"
+                                f"    {spec.verification_sql_upper}"
+                            )
+                        elif spec.verification_sql:
+                            lines.append(
+                                f"  Bound computed by:\n"
+                                f"    {spec.verification_sql}"
+                            )
+                    elif result.test_type == "column_alignment":
+                        if spec.expected_column_count is not None:
+                            lines.append(
+                                f"  Expected column count: {spec.expected_column_count}"
+                            )
+                    elif result.test_type == "ordering":
+                        if spec.required_sql_keywords:
+                            lines.append(
+                                f"  Required keywords: {', '.join(spec.required_sql_keywords)}"
+                            )
+                    elif result.test_type == "scale":
+                        parts: list[str] = []
+                        if spec.numeric_min is not None:
+                            parts.append(f"min={spec.numeric_min}")
+                        if spec.numeric_max is not None:
+                            parts.append(f"max={spec.numeric_max}")
+                        if parts:
+                            lines.append(f"  Expected range: {', '.join(parts)}")
+                    elif result.test_type == "null":
+                        if spec.check_columns:
+                            lines.append(
+                                f"  Columns that must not be NULL: {', '.join(spec.check_columns)}"
+                            )
+                    if spec.fix_hint:
+                        lines.append(f"  Fix hint: {spec.fix_hint}")
+                verif_blocks.append("\n".join(lines))
+
+            if verif_blocks:
+                issues_block_parts.append(
+                    "[Verification Issues]\n\n" + "\n\n".join(verif_blocks)
+                )
 
         issues_block = (
             "\n\n".join(issues_block_parts)
             if issues_block_parts
             else "  (none recorded)"
         )
+
+        # Build result sample section (first 5 rows) when SQL executed successfully
+        result_sample = ""
+        if exec_result is not None and exec_result.success and exec_result.rows:
+            sample_rows = exec_result.rows[:5]
+            row_lines: list[str] = []
+            for i, row in enumerate(sample_rows, 1):
+                row_str = f"  Row {i}: {tuple(row)}"
+                if len(row_str) > 120:
+                    row_str = row_str[:117] + "..."
+                row_lines.append(row_str)
+            if len(exec_result.rows) > 5:
+                row_lines.append(f"  ... ({len(exec_result.rows)} rows total)")
+            result_sample = (
+                "\nCurrent result sample (first 5 rows):\n"
+                + "\n".join(row_lines)
+                + "\n"
+            )
 
         return (
             "You are an expert SQL debugger. Fix the SQL query below.\n\n"
@@ -671,7 +764,8 @@ class QueryFixer:
             f"Evidence: {evidence or 'None'}\n"
             f"Matched values in database:\n{formatted_cells}\n\n"
             "Current SQL:\n"
-            f"{sql}\n\n"
+            f"{sql}\n"
+            f"{result_sample}\n"
             "Issues found:\n"
             f"{issues_block}\n\n"
             "Write only the corrected SQL query. No explanation."

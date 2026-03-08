@@ -143,8 +143,8 @@ async def test_generate_plan_returns_structured_tests():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_generate_plan_returns_empty_on_llm_error():
-    """LLM raises LLMError → generate_plan returns [] (never raises)."""
+async def test_generate_plan_returns_default_on_llm_error():
+    """LLM raises LLMError → generate_plan returns default grain+column_alignment plan (never raises)."""
     mock_client = AsyncMock()
     mock_client.generate = AsyncMock(side_effect=LLMError("API unavailable"))
 
@@ -156,7 +156,9 @@ async def test_generate_plan_returns_empty_on_llm_error():
             schema="CREATE TABLE students (id INTEGER PRIMARY KEY);",
         )
 
-    assert specs == []
+    assert len(specs) == 2
+    assert specs[0].test_type == "grain"
+    assert specs[1].test_type == "column_alignment"
 
 
 # ---------------------------------------------------------------------------
@@ -462,17 +464,19 @@ async def test_scale_test_out_of_range_percentage():
 
 
 # ---------------------------------------------------------------------------
-# Test 11: expensive tests skipped when run_expensive=False
+# Test 11: boundary (expensive) skipped when run_expensive=False;
+#           column_alignment (now cheap) always runs
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_expensive_tests_skipped_when_run_expensive_false():
-    """column_alignment and boundary tests are skipped when run_expensive=False."""
+    """boundary is skipped when run_expensive=False; column_alignment now runs (cheap)."""
     verifier = QueryVerifier()
     specs = [
         VerificationTestSpec(
             test_type="column_alignment",
             description="SELECT columns answer the question",
+            # No expected_column_count → will produce 'skip' status (not an error)
             expected_outcome="Columns are relevant",
             fix_hint="Review SELECT list",
             is_critical=True,
@@ -508,13 +512,17 @@ async def test_expensive_tests_skipped_when_run_expensive_false():
             run_expensive=False,
         )
 
-    # column_alignment and boundary should be skipped (not in results)
     evaluated_types = {r.test_type for r in eval_result.test_results}
+    # ordering and column_alignment are cheap — they run
     assert "ordering" in evaluated_types
-    assert "column_alignment" not in evaluated_types
+    assert "column_alignment" in evaluated_types
+    # boundary is still expensive — it is skipped
     assert "boundary" not in evaluated_types
-    # LLM should not have been called
+    # LLM should not have been called (column_alignment is now cheap)
     mock_client.generate.assert_not_called()
+    # column_alignment has no expected_column_count → status is 'skip'
+    ca_result = next(r for r in eval_result.test_results if r.test_type == "column_alignment")
+    assert ca_result.status == "skip"
 
 
 # ---------------------------------------------------------------------------
@@ -1013,13 +1021,15 @@ async def test_symmetry_test_skip_no_sql():
 
 
 # ---------------------------------------------------------------------------
-# Test 26: expensive tests (column_alignment, boundary, symmetry) all run
-#          when run_expensive=True
+# Test 26: expensive tests (boundary, symmetry) run when run_expensive=True;
+#          column_alignment (now cheap) runs regardless and makes no LLM call
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_expensive_tests_all_run_when_run_expensive_true():
-    """column_alignment, boundary, and symmetry are evaluated when run_expensive=True."""
+    """boundary and symmetry are evaluated when run_expensive=True.
+    column_alignment is now cheap (structural) — no LLM call, runs always.
+    """
     db_path = _make_temp_db()
     try:
         verifier = QueryVerifier()
@@ -1027,7 +1037,8 @@ async def test_expensive_tests_all_run_when_run_expensive_true():
             VerificationTestSpec(
                 test_type="column_alignment",
                 description="Columns answer the question",
-                expected_outcome="Columns are relevant",
+                expected_column_count=1,  # COUNT(*) returns 1 column → pass
+                expected_outcome="1 column returned",
                 fix_hint="Review SELECT list",
                 is_critical=True,
             ),
@@ -1062,14 +1073,165 @@ async def test_expensive_tests_all_run_when_run_expensive_true():
             )
 
         evaluated_types = {r.test_type for r in eval_result.test_results}
-        # All three expensive tests must be present in results
         assert "column_alignment" in evaluated_types
         assert "boundary" in evaluated_types
         assert "symmetry" in evaluated_types
-        # LLM called only for column_alignment and boundary — symmetry uses SQL, not LLM
-        assert mock_client.generate.call_count == 2
+        # column_alignment is now cheap — only boundary calls the LLM (symmetry uses SQL)
+        assert mock_client.generate.call_count == 1
+        # column_alignment should pass (1 column returned, expected 1)
+        ca_result = next(r for r in eval_result.test_results if r.test_type == "column_alignment")
+        assert ca_result.status == "pass"
     finally:
         os.unlink(db_path)
+
+
+# ---------------------------------------------------------------------------
+# Tests A-E: column_alignment structural column-count tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_column_alignment_pass_structural():
+    """column_alignment passes when actual column count equals expected_column_count."""
+    verifier = QueryVerifier()
+    spec = VerificationTestSpec(
+        test_type="column_alignment",
+        description="Scalar aggregate — expect 1 column",
+        expected_column_count=1,
+        expected_outcome="1 column returned",
+        fix_hint="Return only the aggregate value",
+        is_critical=True,
+    )
+    exec_result = _exec_result([(42,)])  # 1 column
+
+    eval_result = await verifier.evaluate_candidate(
+        specs=[spec],
+        candidate_id="test_col_align_pass",
+        sql="SELECT COUNT(*) FROM students",
+        exec_result=exec_result,
+        db_path="/dev/null",
+        run_expensive=False,  # should run anyway — now cheap
+    )
+
+    assert eval_result.all_pass is True
+    ca_result = eval_result.test_results[0]
+    assert ca_result.status == "pass"
+    assert "1" in ca_result.actual_outcome
+
+
+@pytest.mark.asyncio
+async def test_column_alignment_fail_structural():
+    """column_alignment fails when actual column count differs from expected."""
+    verifier = QueryVerifier()
+    spec = VerificationTestSpec(
+        test_type="column_alignment",
+        description="Scalar aggregate — expect 1 column",
+        expected_column_count=1,
+        expected_outcome="1 column returned",
+        fix_hint="Remove extra columns from SELECT",
+        is_critical=True,
+    )
+    exec_result = _exec_result([(1, "Alice", 3.9)])  # 3 columns, expected 1
+
+    eval_result = await verifier.evaluate_candidate(
+        specs=[spec],
+        candidate_id="test_col_align_fail",
+        sql="SELECT id, name, gpa FROM students",
+        exec_result=exec_result,
+        db_path="/dev/null",
+        run_expensive=False,
+    )
+
+    assert eval_result.all_pass is False
+    ca_result = eval_result.test_results[0]
+    assert ca_result.status == "fail"
+    assert "3" in ca_result.actual_outcome   # actual count
+    assert "1" in ca_result.actual_outcome   # expected count
+    assert len(eval_result.failure_hints) >= 1
+
+
+@pytest.mark.asyncio
+async def test_column_alignment_skip_when_no_expected_count():
+    """column_alignment skips when expected_column_count is not set."""
+    verifier = QueryVerifier()
+    spec = VerificationTestSpec(
+        test_type="column_alignment",
+        description="Columns answer the question",
+        # expected_column_count intentionally omitted
+        expected_outcome="Correct columns",
+        fix_hint="Review SELECT list",
+        is_critical=True,
+    )
+    exec_result = _exec_result([(1, "Alice")])
+
+    eval_result = await verifier.evaluate_candidate(
+        specs=[spec],
+        candidate_id="test_col_align_skip",
+        sql="SELECT id, name FROM students",
+        exec_result=exec_result,
+        db_path="/dev/null",
+        run_expensive=False,
+    )
+
+    ca_result = eval_result.test_results[0]
+    assert ca_result.status == "skip"
+    assert eval_result.all_pass is True  # skip counts as passing
+
+
+@pytest.mark.asyncio
+async def test_column_alignment_skip_on_empty_result():
+    """column_alignment skips when exec_result has no rows."""
+    verifier = QueryVerifier()
+    spec = VerificationTestSpec(
+        test_type="column_alignment",
+        description="Expect 1 column",
+        expected_column_count=1,
+        expected_outcome="1 column",
+        fix_hint="Fix query",
+        is_critical=True,
+    )
+    exec_result = _exec_result([])  # no rows
+
+    eval_result = await verifier.evaluate_candidate(
+        specs=[spec],
+        candidate_id="test_col_align_empty",
+        sql="SELECT COUNT(*) FROM students WHERE 1=0",
+        exec_result=exec_result,
+        db_path="/dev/null",
+        run_expensive=False,
+    )
+
+    ca_result = eval_result.test_results[0]
+    assert ca_result.status == "skip"
+
+
+@pytest.mark.asyncio
+async def test_column_alignment_runs_when_run_expensive_false():
+    """column_alignment runs even with run_expensive=False (it is now a cheap test)."""
+    verifier = QueryVerifier()
+    spec = VerificationTestSpec(
+        test_type="column_alignment",
+        description="Expect 2 columns",
+        expected_column_count=2,
+        expected_outcome="2 columns",
+        fix_hint="Add missing column",
+        is_critical=True,
+    )
+    exec_result = _exec_result([(1, "Alice"), (2, "Bob")])  # 2 cols per row
+
+    # No mock needed — no LLM call expected
+    eval_result = await verifier.evaluate_candidate(
+        specs=[spec],
+        candidate_id="test_col_align_cheap",
+        sql="SELECT id, name FROM students",
+        exec_result=exec_result,
+        db_path="/dev/null",
+        run_expensive=False,
+    )
+
+    evaluated_types = {r.test_type for r in eval_result.test_results}
+    assert "column_alignment" in evaluated_types
+    ca_result = next(r for r in eval_result.test_results if r.test_type == "column_alignment")
+    assert ca_result.status == "pass"
 
 
 # ---------------------------------------------------------------------------

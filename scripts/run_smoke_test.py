@@ -688,6 +688,39 @@ def _build_error_trace(entry, error_stage: str, error_msg: str) -> dict:
     }
 
 
+def _build_verif_plan_entry(spec, db_path: str) -> dict:
+    """Build a verif_plan entry with full spec fields and computed upper bound.
+
+    For grain tests, executes verification_sql_upper (or verification_sql as
+    fallback) against the database and records the integer result as
+    upper_bound_value so it can be compared against gold_row_count later.
+    """
+    upper_bound_value = None
+    if spec.test_type == "grain":
+        sql_to_run = spec.verification_sql_upper or spec.verification_sql
+        if sql_to_run:
+            try:
+                vr = execute_sql(db_path, sql_to_run)
+                if vr.success and vr.rows and isinstance(vr.rows[0][0], (int, float)):
+                    upper_bound_value = int(vr.rows[0][0])
+            except Exception:
+                pass  # leave as None
+    return {
+        "test_type": spec.test_type,
+        "description": spec.description,
+        "is_critical": spec.is_critical,
+        "fix_hint": spec.fix_hint,
+        "verification_sql_upper": spec.verification_sql_upper,
+        "verification_sql": spec.verification_sql,
+        "upper_bound_value": upper_bound_value,
+        "row_count_min": spec.row_count_min,
+        "row_count_max": spec.row_count_max,
+        "expected_column_count": spec.expected_column_count,
+        "required_sql_keywords": spec.required_sql_keywords,
+        "check_columns": spec.check_columns,
+    }
+
+
 async def _ops_7_9_body(
     entry,
     db_path: str,
@@ -1050,19 +1083,12 @@ async def _ops_7_9_body(
                 "difficulty": entry.get("difficulty") if False else trace.get("difficulty"),
                 "correct": trace.get("correct", False),          # filled in later by eval
                 "oracle_post_fix": op8.get("oracle_post_fix", False),
+                "gold_row_count": trace.get("gold_row_count"),
                 # Verification plan
                 "verif_plan_count": len(verif_plan_specs),
                 "verif_plan_error": None,
                 "verif_plan": [
-                    {
-                        "test_type": s.test_type,
-                        "description": s.description,
-                        "is_critical": s.is_critical,
-                        "fix_hint": s.fix_hint,
-                        "has_verification_sql": bool(s.verification_sql),
-                        "required_sql_keywords": s.required_sql_keywords,
-                        "check_columns": s.check_columns,
-                    }
+                    _build_verif_plan_entry(s, db_path)
                     for s in verif_plan_specs
                 ],
                 # Per-candidate
