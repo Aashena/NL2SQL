@@ -708,7 +708,7 @@ def _build_verif_plan_entry(spec, db_path: str) -> dict:
     return {
         "test_type": spec.test_type,
         "description": spec.description,
-        "is_critical": spec.is_critical,
+        "is_critical": spec.test_type in {"grain", "duplicate", "column_alignment"},
         "fix_hint": spec.fix_hint,
         "verification_sql_upper": spec.verification_sql_upper,
         "verification_sql": spec.verification_sql,

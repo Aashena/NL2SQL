@@ -486,8 +486,11 @@ class AdaptiveSelector:
                 f"{safe_sql_b}\n\n"
                 f"=== Candidate B Execution Result ===\n"
                 f"{safe_result_b}\n\n"
-                "Think through which SQL better answers the question. Consider: row counts, "
-                "column values, join correctness, aggregation logic, and NULL handling.\n"
+                "Evaluate based on the ACTUAL EXECUTION RESULTS shown above, not on SQL structure.\n"
+                "A simpler query that returns the correct rows is BETTER than a complex query that returns wrong or extra rows.\n"
+                "Do NOT assume that more JOINs, explicit CAST, subqueries, or aggregations make a query more correct.\n"
+                "Focus on: Which result better matches what the question asks for?\n"
+                "When both results look equivalent, prefer the SIMPLER SQL (fewer joins, fewer casts, shorter).\n"
                 "After your analysis, write your final answer on the last line as exactly:\n"
                 "FINAL: A\nor\nFINAL: B"
             )

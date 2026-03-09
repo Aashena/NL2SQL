@@ -1289,3 +1289,169 @@ async def test_verification_failure_then_fixed():
         assert fc.confidence_score > 0.0
     finally:
         os.unlink(db_path)
+
+
+# ---------------------------------------------------------------------------
+# Tests for ordering-specific fix prompt enrichment
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _FakeSchemas:
+    s2_ddl: str = "CREATE TABLE students (id INT, name TEXT, gpa REAL);"
+
+
+def _make_ordering_verif_eval() -> VerificationEvaluation:
+    return VerificationEvaluation(
+        candidate_id="test",
+        test_results=[
+            VerificationTestResult(
+                test_type="ordering",
+                status="fail",
+                actual_outcome="Missing required SQL clauses: ['ORDER BY', 'LIMIT'].",
+                is_critical=False,
+            )
+        ],
+        all_pass=False,
+        confidence_adjustment=-0.1,
+        failure_hints=["ORDERING TEST FAILED"],
+    )
+
+
+def test_fix_prompt_ordering_full_spec():
+    """When spec has all ordering fields, prompt contains a complete ORDER BY clause."""
+    spec = VerificationTestSpec(
+        test_type="ordering",
+        description="top-5 by GPA",
+        required_sql_keywords=["ORDER BY", "LIMIT"],
+        order_by_column="gpa",
+        order_by_direction="DESC",
+        order_limit=5,
+        expected_outcome="ORDER BY gpa DESC LIMIT 5 present",
+        fix_hint="Add ORDER BY gpa DESC LIMIT 5 before the semicolon.",
+        is_critical=False,
+    )
+    prompt = QueryFixer._build_fix_prompt(
+        sql="SELECT * FROM students",
+        question="Who are the top 5 students by GPA?",
+        evidence="",
+        schemas=_FakeSchemas(),
+        cell_matches=[],
+        exec_issues=[],
+        verif_eval=_make_ordering_verif_eval(),
+        verif_specs=[spec],
+        exec_result=None,
+    )
+    assert "ORDER BY gpa DESC LIMIT 5" in prompt
+    assert "gpa" in prompt
+    assert "highest first" in prompt
+
+
+def test_fix_prompt_ordering_limit_from_question():
+    """When spec has no order_limit, LIMIT N is derived from question text."""
+    spec = VerificationTestSpec(
+        test_type="ordering",
+        description="top-3 by score",
+        required_sql_keywords=["ORDER BY", "LIMIT"],
+        order_by_column="score",
+        order_by_direction="DESC",
+        order_limit=None,   # not set by plan LLM
+        expected_outcome="ORDER BY score DESC LIMIT 3 present",
+        fix_hint="Add ORDER BY score DESC LIMIT 3.",
+        is_critical=False,
+    )
+    prompt = QueryFixer._build_fix_prompt(
+        sql="SELECT * FROM students",
+        question="Find the top 3 students by score.",
+        evidence="",
+        schemas=_FakeSchemas(),
+        cell_matches=[],
+        exec_issues=[],
+        verif_eval=_make_ordering_verif_eval(),
+        verif_specs=[spec],
+        exec_result=None,
+    )
+    assert "LIMIT 3" in prompt  # extracted from question
+
+
+def test_fix_prompt_ordering_asc_direction():
+    """When order_by_direction is ASC, prompt shows 'lowest first'."""
+    spec = VerificationTestSpec(
+        test_type="ordering",
+        description="bottom-2 by score",
+        required_sql_keywords=["ORDER BY", "LIMIT"],
+        order_by_column="score",
+        order_by_direction="ASC",
+        order_limit=2,
+        expected_outcome="ORDER BY score ASC LIMIT 2 present",
+        fix_hint="Add ORDER BY score ASC LIMIT 2.",
+        is_critical=False,
+    )
+    prompt = QueryFixer._build_fix_prompt(
+        sql="SELECT * FROM students",
+        question="What are the 2 lowest scores?",
+        evidence="",
+        schemas=_FakeSchemas(),
+        cell_matches=[],
+        exec_issues=[],
+        verif_eval=_make_ordering_verif_eval(),
+        verif_specs=[spec],
+        exec_result=None,
+    )
+    assert "ORDER BY score ASC LIMIT 2" in prompt
+    assert "lowest first" in prompt
+
+
+def test_fix_prompt_ordering_no_column_uses_placeholder():
+    """When spec has no order_by_column, prompt uses <ranking_column> placeholder."""
+    spec = VerificationTestSpec(
+        test_type="ordering",
+        description="top-5 query",
+        required_sql_keywords=["ORDER BY", "LIMIT"],
+        order_by_column=None,    # plan LLM didn't set column
+        order_by_direction="DESC",
+        order_limit=5,
+        expected_outcome="ORDER BY + LIMIT present",
+        fix_hint="Add ORDER BY <col> DESC LIMIT 5.",
+        is_critical=False,
+    )
+    prompt = QueryFixer._build_fix_prompt(
+        sql="SELECT * FROM students",
+        question="Who are the top 5 students?",
+        evidence="",
+        schemas=_FakeSchemas(),
+        cell_matches=[],
+        exec_issues=[],
+        verif_eval=_make_ordering_verif_eval(),
+        verif_specs=[spec],
+        exec_result=None,
+    )
+    assert "<ranking_column>" in prompt
+    assert "LIMIT 5" in prompt
+
+
+def test_fix_prompt_ordering_direction_from_question_fallback():
+    """When spec has no order_by_direction, direction is derived from question keywords."""
+    spec = VerificationTestSpec(
+        test_type="ordering",
+        description="lowest price query",
+        required_sql_keywords=["ORDER BY", "LIMIT"],
+        order_by_column="price",
+        order_by_direction=None,   # not set by plan LLM
+        order_limit=3,
+        expected_outcome="ORDER BY price ASC LIMIT 3 present",
+        fix_hint="Add ORDER BY price ASC LIMIT 3.",
+        is_critical=False,
+    )
+    prompt = QueryFixer._build_fix_prompt(
+        sql="SELECT * FROM products",
+        question="Find the 3 lowest priced items.",
+        evidence="",
+        schemas=_FakeSchemas(),
+        cell_matches=[],
+        exec_issues=[],
+        verif_eval=_make_ordering_verif_eval(),
+        verif_specs=[spec],
+        exec_result=None,
+    )
+    # "lowest" → ASC derived from question
+    assert "ASC" in prompt

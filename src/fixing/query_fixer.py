@@ -43,6 +43,8 @@ from src.verification.query_verifier import (
     QueryVerifier,
     VerificationEvaluation,
     VerificationTestSpec,
+    _derive_direction_from_question,
+    _extract_limit_from_question,
 )
 
 if TYPE_CHECKING:
@@ -692,13 +694,32 @@ class QueryFixer:
                     if result.test_type == "grain":
                         if spec.verification_sql_upper:
                             lines.append(
-                                f"  Upper bound computed by:\n"
+                                f"  Upper bound SQL:\n"
                                 f"    {spec.verification_sql_upper}"
                             )
                         elif spec.verification_sql:
                             lines.append(
-                                f"  Bound computed by:\n"
+                                f"  Bound SQL:\n"
                                 f"    {spec.verification_sql}"
+                            )
+                        if result.computed_upper_bound is not None and result.actual_row_count is not None:
+                            diff = result.actual_row_count - result.computed_upper_bound
+                            if diff > 0:
+                                direction = (
+                                    f"  → Your result has {diff} extra rows. "
+                                    "Possible causes: missing DISTINCT, wrong JOIN grain, or missing GROUP BY."
+                                )
+                            elif diff < 0:
+                                direction = (
+                                    f"  → Your result has {abs(diff)} fewer rows than expected. "
+                                    "Possible causes: over-filtering in WHERE or incorrect JOIN."
+                                )
+                            else:
+                                direction = "  → Row count matches the upper bound exactly."
+                            lines.append(
+                                f"  Upper bound value: {result.computed_upper_bound} rows\n"
+                                f"  Your query returned: {result.actual_row_count} rows\n"
+                                f"{direction}"
                             )
                     elif result.test_type == "column_alignment":
                         if spec.expected_column_count is not None:
@@ -710,6 +731,26 @@ class QueryFixer:
                             lines.append(
                                 f"  Required keywords: {', '.join(spec.required_sql_keywords)}"
                             )
+                        # Derive direction: spec field → question keywords → default DESC
+                        direction = (
+                            spec.order_by_direction
+                            or _derive_direction_from_question(question)
+                            or "DESC"
+                        )
+                        # Derive LIMIT N: spec field → question regex
+                        n_val = spec.order_limit or _extract_limit_from_question(question)
+                        col = spec.order_by_column
+
+                        col_str = col if col else "<ranking_column>"
+                        n_str = str(n_val) if n_val is not None else "N"
+                        lines.append(
+                            f"  Required clause: ORDER BY {col_str} {direction} LIMIT {n_str}"
+                        )
+                        if col:
+                            dir_label = "highest first" if direction == "DESC" else "lowest first"
+                            lines.append(f"  Sort column: '{col}' ({dir_label})")
+                        if n_val is not None:
+                            lines.append(f"  Limit value: {n_val}")
                     elif result.test_type == "scale":
                         parts: list[str] = []
                         if spec.numeric_min is not None:
@@ -750,6 +791,12 @@ class QueryFixer:
                 row_lines.append(row_str)
             if len(exec_result.rows) > 5:
                 row_lines.append(f"  ... ({len(exec_result.rows)} rows total)")
+            has_duplicates = len(sample_rows) != len({tuple(r) for r in sample_rows})
+            if has_duplicates:
+                row_lines.append(
+                    "  ⚠ Note: identical rows appear in this sample — rows may be duplicated "
+                    "due to an incorrect JOIN. Consider adding DISTINCT or fixing the JOIN condition."
+                )
             result_sample = (
                 "\nCurrent result sample (first 5 rows):\n"
                 + "\n".join(row_lines)
