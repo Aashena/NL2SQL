@@ -667,9 +667,17 @@ async def test_exec_fail_skips_verification():
 
 @pytest.mark.asyncio
 async def test_fix_prompt_includes_verif_failures():
-    """When verification fails after exec succeeds, fix prompt includes the hint."""
+    """When verification fails, fix prompt includes rich per-test context.
+
+    Checks:
+    - ordering test: required_sql_keywords and fix_hint appear in prompt
+    - grain test: verification_sql_upper appears in prompt
+    - column_alignment test: check_columns appear in prompt
+    - result sample rows appear (exec succeeded → rows available)
+    """
     db_path = _make_temp_db()
     try:
+        # ── ordering failure ──────────────────────────────────────────────────
         ordering_spec = VerificationTestSpec(
             test_type="ordering",
             description="top-5 needs ORDER BY + LIMIT",
@@ -690,7 +698,7 @@ async def test_fix_prompt_includes_verif_failures():
             ],
             all_pass=False,
             confidence_adjustment=-0.1,
-            failure_hints=["ORDERING TEST FAILED: Missing ORDER BY and LIMIT  Hint: Add ORDER BY gpa DESC LIMIT 5"],
+            failure_hints=["ORDERING TEST FAILED: Missing ORDER BY and LIMIT"],
         )
         all_pass_eval = VerificationEvaluation(
             candidate_id="test",
@@ -699,7 +707,6 @@ async def test_fix_prompt_includes_verif_failures():
             confidence_adjustment=0.0,
             failure_hints=[],
         )
-        # Non-empty plan so verif_specs is truthy → evaluate_candidate gets called
         mock_verifier = _make_noop_verifier(plan=[ordering_spec], evaluation=failing_eval)
         call_count = [0]
 
@@ -711,8 +718,6 @@ async def test_fix_prompt_includes_verif_failures():
 
         mock_verifier.evaluate_candidate = mock_evaluate
         fixer = QueryFixer(verifier=mock_verifier)
-
-        # SQL that executes successfully (so we get into verification)
         candidates = [_make_candidate("SELECT * FROM students", generator_id="test")]
         mock_client = _make_mock_fix_client("SELECT * FROM students ORDER BY gpa DESC LIMIT 5")
 
@@ -726,10 +731,102 @@ async def test_fix_prompt_includes_verif_failures():
                 cell_matches=[],
             )
 
-        # The fix prompt should mention the verification failure hint
         assert mock_client.generate.call_count >= 1
         fix_prompt = mock_client.generate.call_args_list[0].kwargs["messages"][0]["content"]
-        assert "Verification Issues" in fix_prompt or "ORDERING TEST FAILED" in fix_prompt
+
+        # ordering: structured block header + required keywords + fix_hint
+        assert "ORDERING TEST FAILED" in fix_prompt
+        assert "ORDER BY" in fix_prompt
+        assert "LIMIT" in fix_prompt
+        assert "Add ORDER BY gpa DESC LIMIT 5" in fix_prompt  # fix_hint
+        # Result sample: exec succeeded → rows from students table appear
+        assert "Current result sample" in fix_prompt
+
+        # ── grain failure: verification_sql_upper appears ─────────────────────
+        grain_spec = VerificationTestSpec(
+            test_type="grain",
+            description="one row per student",
+            verification_sql_upper="SELECT COUNT(DISTINCT id) FROM students",
+            expected_outcome="row count <= distinct id count",
+            fix_hint="Add GROUP BY id to collapse duplicates",
+            is_critical=True,
+        )
+        grain_fail_eval = VerificationEvaluation(
+            candidate_id="grain_test",
+            test_results=[
+                VerificationTestResult(
+                    test_type="grain",
+                    status="fail",
+                    actual_outcome="Row count 9 exceeds upper bound 3",
+                    is_critical=True,
+                )
+            ],
+            all_pass=False,
+            confidence_adjustment=-0.3,
+            failure_hints=["GRAIN TEST FAILED"],
+        )
+        mock_verifier2 = _make_noop_verifier(plan=[grain_spec], evaluation=grain_fail_eval)
+        mock_verifier2.evaluate_candidate = AsyncMock(return_value=grain_fail_eval)
+        fixer2 = QueryFixer(verifier=mock_verifier2)
+        mock_client2 = _make_mock_fix_client("SELECT id FROM students GROUP BY id")
+
+        with patch("src.fixing.query_fixer.get_client", return_value=mock_client2):
+            await fixer2.fix_candidates(
+                candidates=[_make_candidate("SELECT * FROM students", generator_id="grain_test")],
+                question="List one row per student",
+                evidence="",
+                schemas=_make_schemas(),
+                db_path=db_path,
+                cell_matches=[],
+            )
+
+        grain_prompt = mock_client2.generate.call_args_list[0].kwargs["messages"][0]["content"]
+        assert "GRAIN TEST FAILED" in grain_prompt
+        assert "SELECT COUNT(DISTINCT id) FROM students" in grain_prompt  # verification_sql_upper
+        assert "Add GROUP BY id to collapse duplicates" in grain_prompt   # fix_hint
+
+        # ── column_alignment failure: check_columns appear ────────────────────
+        col_spec = VerificationTestSpec(
+            test_type="column_alignment",
+            description="must return name and gpa",
+            check_columns=["name", "gpa"],
+            expected_outcome="SELECT returns name and gpa",
+            fix_hint="Update SELECT to return name and gpa columns",
+            is_critical=True,
+        )
+        col_fail_eval = VerificationEvaluation(
+            candidate_id="col_test",
+            test_results=[
+                VerificationTestResult(
+                    test_type="column_alignment",
+                    status="fail",
+                    actual_outcome="SELECT columns do not match question requirements",
+                    is_critical=True,
+                )
+            ],
+            all_pass=False,
+            confidence_adjustment=-0.3,
+            failure_hints=["COLUMN_ALIGNMENT TEST FAILED"],
+        )
+        mock_verifier3 = _make_noop_verifier(plan=[col_spec], evaluation=col_fail_eval)
+        mock_verifier3.evaluate_candidate = AsyncMock(return_value=col_fail_eval)
+        fixer3 = QueryFixer(verifier=mock_verifier3)
+        mock_client3 = _make_mock_fix_client("SELECT name, gpa FROM students")
+
+        with patch("src.fixing.query_fixer.get_client", return_value=mock_client3):
+            await fixer3.fix_candidates(
+                candidates=[_make_candidate("SELECT id FROM students", generator_id="col_test")],
+                question="Show student names and GPAs",
+                evidence="",
+                schemas=_make_schemas(),
+                db_path=db_path,
+                cell_matches=[],
+            )
+
+        col_prompt = mock_client3.generate.call_args_list[0].kwargs["messages"][0]["content"]
+        assert "COLUMN_ALIGNMENT TEST FAILED" in col_prompt
+        assert "name" in col_prompt and "gpa" in col_prompt   # check_columns
+        assert "Update SELECT to return name and gpa columns" in col_prompt  # fix_hint
     finally:
         os.unlink(db_path)
 
@@ -1192,3 +1289,169 @@ async def test_verification_failure_then_fixed():
         assert fc.confidence_score > 0.0
     finally:
         os.unlink(db_path)
+
+
+# ---------------------------------------------------------------------------
+# Tests for ordering-specific fix prompt enrichment
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _FakeSchemas:
+    s2_ddl: str = "CREATE TABLE students (id INT, name TEXT, gpa REAL);"
+
+
+def _make_ordering_verif_eval() -> VerificationEvaluation:
+    return VerificationEvaluation(
+        candidate_id="test",
+        test_results=[
+            VerificationTestResult(
+                test_type="ordering",
+                status="fail",
+                actual_outcome="Missing required SQL clauses: ['ORDER BY', 'LIMIT'].",
+                is_critical=False,
+            )
+        ],
+        all_pass=False,
+        confidence_adjustment=-0.1,
+        failure_hints=["ORDERING TEST FAILED"],
+    )
+
+
+def test_fix_prompt_ordering_full_spec():
+    """When spec has all ordering fields, prompt contains a complete ORDER BY clause."""
+    spec = VerificationTestSpec(
+        test_type="ordering",
+        description="top-5 by GPA",
+        required_sql_keywords=["ORDER BY", "LIMIT"],
+        order_by_column="gpa",
+        order_by_direction="DESC",
+        order_limit=5,
+        expected_outcome="ORDER BY gpa DESC LIMIT 5 present",
+        fix_hint="Add ORDER BY gpa DESC LIMIT 5 before the semicolon.",
+        is_critical=False,
+    )
+    prompt = QueryFixer._build_fix_prompt(
+        sql="SELECT * FROM students",
+        question="Who are the top 5 students by GPA?",
+        evidence="",
+        schemas=_FakeSchemas(),
+        cell_matches=[],
+        exec_issues=[],
+        verif_eval=_make_ordering_verif_eval(),
+        verif_specs=[spec],
+        exec_result=None,
+    )
+    assert "ORDER BY gpa DESC LIMIT 5" in prompt
+    assert "gpa" in prompt
+    assert "highest first" in prompt
+
+
+def test_fix_prompt_ordering_limit_from_question():
+    """When spec has no order_limit, LIMIT N is derived from question text."""
+    spec = VerificationTestSpec(
+        test_type="ordering",
+        description="top-3 by score",
+        required_sql_keywords=["ORDER BY", "LIMIT"],
+        order_by_column="score",
+        order_by_direction="DESC",
+        order_limit=None,   # not set by plan LLM
+        expected_outcome="ORDER BY score DESC LIMIT 3 present",
+        fix_hint="Add ORDER BY score DESC LIMIT 3.",
+        is_critical=False,
+    )
+    prompt = QueryFixer._build_fix_prompt(
+        sql="SELECT * FROM students",
+        question="Find the top 3 students by score.",
+        evidence="",
+        schemas=_FakeSchemas(),
+        cell_matches=[],
+        exec_issues=[],
+        verif_eval=_make_ordering_verif_eval(),
+        verif_specs=[spec],
+        exec_result=None,
+    )
+    assert "LIMIT 3" in prompt  # extracted from question
+
+
+def test_fix_prompt_ordering_asc_direction():
+    """When order_by_direction is ASC, prompt shows 'lowest first'."""
+    spec = VerificationTestSpec(
+        test_type="ordering",
+        description="bottom-2 by score",
+        required_sql_keywords=["ORDER BY", "LIMIT"],
+        order_by_column="score",
+        order_by_direction="ASC",
+        order_limit=2,
+        expected_outcome="ORDER BY score ASC LIMIT 2 present",
+        fix_hint="Add ORDER BY score ASC LIMIT 2.",
+        is_critical=False,
+    )
+    prompt = QueryFixer._build_fix_prompt(
+        sql="SELECT * FROM students",
+        question="What are the 2 lowest scores?",
+        evidence="",
+        schemas=_FakeSchemas(),
+        cell_matches=[],
+        exec_issues=[],
+        verif_eval=_make_ordering_verif_eval(),
+        verif_specs=[spec],
+        exec_result=None,
+    )
+    assert "ORDER BY score ASC LIMIT 2" in prompt
+    assert "lowest first" in prompt
+
+
+def test_fix_prompt_ordering_no_column_uses_placeholder():
+    """When spec has no order_by_column, prompt uses <ranking_column> placeholder."""
+    spec = VerificationTestSpec(
+        test_type="ordering",
+        description="top-5 query",
+        required_sql_keywords=["ORDER BY", "LIMIT"],
+        order_by_column=None,    # plan LLM didn't set column
+        order_by_direction="DESC",
+        order_limit=5,
+        expected_outcome="ORDER BY + LIMIT present",
+        fix_hint="Add ORDER BY <col> DESC LIMIT 5.",
+        is_critical=False,
+    )
+    prompt = QueryFixer._build_fix_prompt(
+        sql="SELECT * FROM students",
+        question="Who are the top 5 students?",
+        evidence="",
+        schemas=_FakeSchemas(),
+        cell_matches=[],
+        exec_issues=[],
+        verif_eval=_make_ordering_verif_eval(),
+        verif_specs=[spec],
+        exec_result=None,
+    )
+    assert "<ranking_column>" in prompt
+    assert "LIMIT 5" in prompt
+
+
+def test_fix_prompt_ordering_direction_from_question_fallback():
+    """When spec has no order_by_direction, direction is derived from question keywords."""
+    spec = VerificationTestSpec(
+        test_type="ordering",
+        description="lowest price query",
+        required_sql_keywords=["ORDER BY", "LIMIT"],
+        order_by_column="price",
+        order_by_direction=None,   # not set by plan LLM
+        order_limit=3,
+        expected_outcome="ORDER BY price ASC LIMIT 3 present",
+        fix_hint="Add ORDER BY price ASC LIMIT 3.",
+        is_critical=False,
+    )
+    prompt = QueryFixer._build_fix_prompt(
+        sql="SELECT * FROM products",
+        question="Find the 3 lowest priced items.",
+        evidence="",
+        schemas=_FakeSchemas(),
+        cell_matches=[],
+        exec_issues=[],
+        verif_eval=_make_ordering_verif_eval(),
+        verif_specs=[spec],
+        exec_result=None,
+    )
+    # "lowest" → ASC derived from question
+    assert "ASC" in prompt

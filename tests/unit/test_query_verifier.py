@@ -26,6 +26,8 @@ from src.verification.query_verifier import (
     VerificationEvaluation,
     VerificationTestResult,
     VerificationTestSpec,
+    _derive_direction_from_question,
+    _extract_limit_from_question,
 )
 
 
@@ -87,64 +89,58 @@ def _make_mock_client(text_response: str = "PASS\nLooks good.") -> AsyncMock:
 
 
 # ---------------------------------------------------------------------------
-# Test 1: generate_plan returns structured test list
+# Test 1: generate_plan returns structured test list (both calls mocked)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_generate_plan_returns_structured_tests():
-    """Mock LLM returns a valid tool response → list[VerificationTestSpec]."""
-    mock_client = AsyncMock()
-    mock_client.generate = AsyncMock(
-        return_value=LLMResponse(
-            tool_inputs=[{
-                "tests": [
-                    {
-                        "test_type": "ordering",
-                        "description": "Top N question needs ORDER BY + LIMIT",
-                        "required_sql_keywords": ["ORDER BY", "LIMIT"],
-                        "expected_outcome": "SQL contains ORDER BY and LIMIT",
-                        "fix_hint": "Add ORDER BY gpa DESC LIMIT N",
-                        "is_critical": False,
-                    },
-                    {
-                        "test_type": "column_alignment",
-                        "description": "SELECT columns answer the question",
-                        "expected_outcome": "Columns are relevant to the question",
-                        "fix_hint": "Review the SELECT list",
-                        "is_critical": True,
-                    },
-                ]
-            }],
-            text=None,
-            input_tokens=100,
-            output_tokens=200,
-        )
+    """
+    generate_plan runs two internal calls concurrently.
+    Mock each internal method directly → verify merged result.
+    Column order: grain first, column_alignment second, then others.
+    """
+    ordering_spec = VerificationTestSpec(
+        test_type="ordering",
+        required_sql_keywords=["ORDER BY", "LIMIT"],
+        fix_hint="Add ORDER BY gpa DESC LIMIT N",
+    )
+    grain_spec = VerificationTestSpec(
+        test_type="grain",
+        fix_hint="Check GROUP BY",
+    )
+    col_align_spec = VerificationTestSpec(
+        test_type="column_alignment",
+        expected_column_count=1,
+        fix_hint="Adjust SELECT to return exactly 1 column.",
     )
 
     verifier = QueryVerifier()
-    with patch("src.verification.query_verifier.get_client", return_value=mock_client):
+    with (
+        patch.object(verifier, "_generate_main_plan", AsyncMock(return_value=[grain_spec, ordering_spec])),
+        patch.object(verifier, "_generate_column_alignment_spec", AsyncMock(return_value=col_align_spec)),
+    ):
         specs = await verifier.generate_plan(
             question="Who are the top 5 students by GPA?",
             evidence="",
             schema="CREATE TABLE students (id INTEGER PRIMARY KEY, name TEXT, gpa REAL);",
         )
 
-    assert len(specs) == 2
-    assert isinstance(specs[0], VerificationTestSpec)
-    assert specs[0].test_type == "ordering"
-    assert specs[0].required_sql_keywords == ["ORDER BY", "LIMIT"]
-    assert specs[0].is_critical is False
+    # Expected order: grain → column_alignment → ordering
+    assert len(specs) == 3
+    assert specs[0].test_type == "grain"
     assert specs[1].test_type == "column_alignment"
-    assert specs[1].is_critical is True
+    assert specs[1].expected_column_count == 1
+    assert specs[2].test_type == "ordering"
+    assert specs[2].required_sql_keywords == ["ORDER BY", "LIMIT"]
 
 
 # ---------------------------------------------------------------------------
-# Test 2: generate_plan returns empty list on LLM error
+# Test 2: generate_plan returns default on LLM error (both calls fail)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_generate_plan_returns_empty_on_llm_error():
-    """LLM raises LLMError → generate_plan returns [] (never raises)."""
+async def test_generate_plan_returns_default_on_llm_error():
+    """LLM raises LLMError for ALL calls → fallback: grain + column_alignment (count=None). Never raises."""
     mock_client = AsyncMock()
     mock_client.generate = AsyncMock(side_effect=LLMError("API unavailable"))
 
@@ -156,7 +152,134 @@ async def test_generate_plan_returns_empty_on_llm_error():
             schema="CREATE TABLE students (id INTEGER PRIMARY KEY);",
         )
 
-    assert specs == []
+    assert len(specs) == 2
+    assert specs[0].test_type == "grain"
+    assert specs[1].test_type == "column_alignment"
+    assert specs[1].expected_column_count is None
+
+
+# ---------------------------------------------------------------------------
+# Test 2b: _generate_column_alignment_spec — scalar question → count=1
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_generate_column_alignment_spec_scalar():
+    """Dedicated col-align call: scalar question → expected_column_count=1."""
+    mock_client = AsyncMock()
+    mock_client.generate = AsyncMock(
+        return_value=LLMResponse(
+            tool_inputs=[{
+                "reasoning": "COUNT aggregate → 1 column",
+                "expected_column_count": 1,
+                "column_descriptions": ["enrollment count"],
+            }],
+            text=None,
+            input_tokens=50,
+            output_tokens=30,
+        )
+    )
+
+    verifier = QueryVerifier()
+    with patch("src.verification.query_verifier.get_client", return_value=mock_client):
+        spec = await verifier._generate_column_alignment_spec(
+            question="How many students are enrolled in the club?",
+            evidence="",
+            schema="CREATE TABLE students (id INTEGER PRIMARY KEY, name TEXT);",
+        )
+
+    assert spec.test_type == "column_alignment"
+    assert spec.expected_column_count == 1
+    assert spec.column_descriptions == ["enrollment count"]
+
+
+# ---------------------------------------------------------------------------
+# Test 2c: _generate_column_alignment_spec — two-column question → count=2
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_generate_column_alignment_spec_two_col():
+    """Dedicated col-align call: name+value question → expected_column_count=2."""
+    mock_client = AsyncMock()
+    mock_client.generate = AsyncMock(
+        return_value=LLMResponse(
+            tool_inputs=[{
+                "reasoning": "Question asks for name AND gpa → 2 columns",
+                "expected_column_count": 2,
+                "column_descriptions": ["student name", "GPA"],
+            }],
+            text=None,
+            input_tokens=50,
+            output_tokens=30,
+        )
+    )
+
+    verifier = QueryVerifier()
+    with patch("src.verification.query_verifier.get_client", return_value=mock_client):
+        spec = await verifier._generate_column_alignment_spec(
+            question="List the name and GPA of each student who made the honor roll.",
+            evidence="",
+            schema="CREATE TABLE students (id INTEGER PRIMARY KEY, name TEXT, gpa REAL);",
+        )
+
+    assert spec.test_type == "column_alignment"
+    assert spec.expected_column_count == 2
+    assert spec.column_descriptions == ["student name", "GPA"]
+
+
+# ---------------------------------------------------------------------------
+# Test 2d: _generate_column_alignment_spec — LLM failure → graceful fallback
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_generate_column_alignment_spec_llm_failure():
+    """LLM raises during dedicated col-align call → returns count=None gracefully (never raises)."""
+    mock_client = AsyncMock()
+    mock_client.generate = AsyncMock(side_effect=LLMError("timeout"))
+
+    verifier = QueryVerifier()
+    with patch("src.verification.query_verifier.get_client", return_value=mock_client):
+        spec = await verifier._generate_column_alignment_spec(
+            question="How many schools have an average score above 400?",
+            evidence="",
+            schema="CREATE TABLE schools (id INTEGER PRIMARY KEY, name TEXT);",
+        )
+
+    assert spec.test_type == "column_alignment"
+    assert spec.expected_column_count is None
+    assert spec.column_descriptions == []
+
+
+# ---------------------------------------------------------------------------
+# Test 2e: _generate_column_alignment_spec — mismatched column_descriptions length
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_generate_column_alignment_spec_mismatched_descriptions():
+    """column_descriptions with wrong length → cleared to [] gracefully."""
+    mock_client = AsyncMock()
+    mock_client.generate = AsyncMock(
+        return_value=LLMResponse(
+            tool_inputs=[{
+                "reasoning": "COUNT aggregate → 1 column",
+                "expected_column_count": 1,
+                "column_descriptions": ["col1", "col2"],  # length 2 ≠ count 1
+            }],
+            text=None,
+            input_tokens=50,
+            output_tokens=30,
+        )
+    )
+
+    verifier = QueryVerifier()
+    with patch("src.verification.query_verifier.get_client", return_value=mock_client):
+        spec = await verifier._generate_column_alignment_spec(
+            question="How many schools have an average score above 400?",
+            evidence="",
+            schema="CREATE TABLE schools (id INTEGER PRIMARY KEY, name TEXT);",
+        )
+
+    assert spec.expected_column_count == 1
+    assert spec.column_descriptions == []
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +298,6 @@ async def test_grain_test_pass():
             verification_sql="SELECT COUNT(DISTINCT id) FROM students",
             expected_outcome="Result has 3 rows (one per student)",
             fix_hint="Add GROUP BY student_id",
-            is_critical=True,
         )
         # Query that returns exactly 3 rows (matching the 3 distinct students)
         exec_result = execute_sql(db_path, "SELECT id, name FROM students")
@@ -213,7 +335,6 @@ async def test_grain_test_fail():
             verification_sql="SELECT COUNT(DISTINCT id) FROM students",  # returns 3
             expected_outcome="Result has 3 rows (one per student)",
             fix_hint="Use GROUP BY student_id to get one row per student",
-            is_critical=True,
         )
         # JOIN produces 6 rows (2 courses per student × 3 students)
         exec_result = execute_sql(
@@ -257,7 +378,6 @@ async def test_null_test_pass():
             check_columns=["name"],
             expected_outcome="No NULL names",
             fix_hint="Add WHERE name IS NOT NULL",
-            is_critical=False,
         )
         exec_result = execute_sql(db_path, "SELECT id, name FROM students")
 
@@ -298,7 +418,6 @@ async def test_null_test_fail():
             check_columns=["name"],
             expected_outcome="No NULL names",
             fix_hint="Add WHERE name IS NOT NULL",
-            is_critical=False,
         )
         exec_result = execute_sql(db_path, "SELECT id, name FROM students")
         assert exec_result.success
@@ -336,7 +455,6 @@ async def test_duplicate_test_detects_join_multiplication():
             verification_sql="SELECT COUNT(DISTINCT id) FROM students",
             expected_outcome="Result rows ≈ 3 distinct students",
             fix_hint="Use DISTINCT or restructure the JOIN to avoid row multiplication",
-            is_critical=True,
         )
         exec_result = execute_sql(
             db_path,
@@ -376,7 +494,6 @@ async def test_ordering_test_structural_missing_order_by():
         required_sql_keywords=["ORDER BY", "LIMIT"],
         expected_outcome="SQL contains ORDER BY and LIMIT",
         fix_hint="Add ORDER BY gpa DESC LIMIT 5",
-        is_critical=False,
     )
     exec_result = _exec_result([(1, "Alice", 3.9), (2, "Bob", 2.8)])
 
@@ -409,7 +526,6 @@ async def test_ordering_test_pass_when_keywords_present():
         required_sql_keywords=["ORDER BY", "LIMIT"],
         expected_outcome="SQL contains ORDER BY and LIMIT",
         fix_hint="Add ORDER BY gpa DESC LIMIT 5",
-        is_critical=False,
     )
     exec_result = _exec_result([(1, "Alice", 3.9), (2, "Carol", 3.5)])
 
@@ -441,7 +557,6 @@ async def test_scale_test_out_of_range_percentage():
         numeric_max=100.0,
         expected_outcome="All percentages in 0–100 range",
         fix_hint="Check the calculation — result may be a ratio not a percentage",
-        is_critical=False,
     )
     # Result contains 150.0 which is out of range
     exec_result = _exec_result([(1, 75.0), (2, 150.0), (3, 50.0)])
@@ -462,27 +577,27 @@ async def test_scale_test_out_of_range_percentage():
 
 
 # ---------------------------------------------------------------------------
-# Test 11: expensive tests skipped when run_expensive=False
+# Test 11: boundary (expensive) skipped when run_expensive=False;
+#           column_alignment (now cheap) always runs
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_expensive_tests_skipped_when_run_expensive_false():
-    """column_alignment and boundary tests are skipped when run_expensive=False."""
+    """boundary is skipped when run_expensive=False; column_alignment now runs (cheap)."""
     verifier = QueryVerifier()
     specs = [
         VerificationTestSpec(
             test_type="column_alignment",
             description="SELECT columns answer the question",
+            # No expected_column_count → will produce 'skip' status (not an error)
             expected_outcome="Columns are relevant",
             fix_hint="Review SELECT list",
-            is_critical=True,
         ),
         VerificationTestSpec(
             test_type="boundary",
             description="Date constraints match the question",
             expected_outcome="Date filter is correct",
             fix_hint="Adjust the date range",
-            is_critical=False,
         ),
         VerificationTestSpec(
             test_type="ordering",
@@ -490,7 +605,6 @@ async def test_expensive_tests_skipped_when_run_expensive_false():
             required_sql_keywords=["ORDER BY", "LIMIT"],
             expected_outcome="ORDER BY + LIMIT present",
             fix_hint="Add ORDER BY col LIMIT N",
-            is_critical=False,
         ),
     ]
     exec_result = _exec_result([(1, "Alice")])
@@ -508,13 +622,17 @@ async def test_expensive_tests_skipped_when_run_expensive_false():
             run_expensive=False,
         )
 
-    # column_alignment and boundary should be skipped (not in results)
     evaluated_types = {r.test_type for r in eval_result.test_results}
+    # ordering and column_alignment are cheap — they run
     assert "ordering" in evaluated_types
-    assert "column_alignment" not in evaluated_types
+    assert "column_alignment" in evaluated_types
+    # boundary is still expensive — it is skipped
     assert "boundary" not in evaluated_types
-    # LLM should not have been called
+    # LLM should not have been called (column_alignment is now cheap)
     mock_client.generate.assert_not_called()
+    # column_alignment has no expected_column_count → status is 'skip'
+    ca_result = next(r for r in eval_result.test_results if r.test_type == "column_alignment")
+    assert ca_result.status == "skip"
 
 
 # ---------------------------------------------------------------------------
@@ -578,7 +696,6 @@ async def test_evaluation_error_becomes_error_no_penalty():
         verification_sql="SELECT COUNT(*) FROM nonexistent_table_xyz",
         expected_outcome="3 rows",
         fix_hint="Fix the query",
-        is_critical=True,
     )
     db_path = _make_temp_db()
     try:
@@ -618,7 +735,6 @@ async def test_grain_range_pass():
         row_count_max=5,
         expected_outcome="Result has 2-5 rows",
         fix_hint="Review GROUP BY",
-        is_critical=True,
     )
     exec_result = _exec_result([(1,), (2,), (3,)])  # 3 rows
 
@@ -652,7 +768,6 @@ async def test_grain_range_fail_below_min():
         row_count_max=5,
         expected_outcome="Non-empty result",
         fix_hint="Check WHERE clause — may filter out all rows",
-        is_critical=True,
     )
     exec_result = _exec_result([])  # 0 rows
 
@@ -687,7 +802,6 @@ async def test_grain_range_fail_above_max():
             verification_sql_upper="SELECT COUNT(DISTINCT id) FROM students",  # → 3
             expected_outcome="At most 3 rows",
             fix_hint="Use GROUP BY student_id or DISTINCT to avoid JOIN multiplication",
-            is_critical=True,
         )
         # JOIN produces 6 rows (2 courses × 3 students)
         exec_result = execute_sql(
@@ -729,7 +843,6 @@ async def test_grain_column_count_pass():
         expected_column_count=2,
         expected_outcome="2-column result",
         fix_hint="Check SELECT list",
-        is_critical=True,
     )
     exec_result = _exec_result([(1, "Alice"), (2, "Bob"), (3, "Carol")])  # 3 rows, 2 cols
 
@@ -763,7 +876,6 @@ async def test_grain_column_count_fail():
         expected_column_count=3,
         expected_outcome="3-column result",
         fix_hint="Add missing column to SELECT",
-        is_critical=True,
     )
     exec_result = _exec_result([(1, "Alice"), (2, "Bob")])  # 2 rows, 2 cols
 
@@ -798,7 +910,6 @@ async def test_grain_combined_fail():
         expected_column_count=3,
         expected_outcome="≤2 rows, 3 cols",
         fix_hint="Fix both grain and SELECT list",
-        is_critical=True,
     )
     # 5 rows with 1 column each — violates both constraints
     exec_result = _exec_result([(x,) for x in range(5)])
@@ -837,7 +948,6 @@ async def test_grain_combined_pass():
         expected_column_count=2,
         expected_outcome="1-5 rows, 2 cols",
         fix_hint="Fix SELECT list or GROUP BY",
-        is_critical=True,
     )
     exec_result = _exec_result([(1, "Alice"), (2, "Bob"), (3, "Carol")])  # 3 rows, 2 cols
 
@@ -875,7 +985,6 @@ async def test_grain_backward_compat_verification_sql():
             verification_sql="SELECT COUNT(DISTINCT id) FROM students",  # → 3
             expected_outcome="3 rows",
             fix_hint="Add GROUP BY student_id",
-            is_critical=True,
         )
         exec_result = execute_sql(db_path, "SELECT id, name FROM students")
         assert exec_result.success and len(exec_result.rows) == 3
@@ -915,7 +1024,6 @@ async def test_symmetry_test_pass():
             verification_sql="SELECT COUNT(*) FROM enrollments",
             expected_outcome="Main result equals 6",
             fix_hint="Check that the GROUP BY / aggregation is correct",
-            is_critical=False,
         )
         exec_result = execute_sql(db_path, "SELECT COUNT(*) FROM enrollments")
         assert exec_result.success and exec_result.rows[0][0] == 6
@@ -955,7 +1063,6 @@ async def test_symmetry_test_fail():
             verification_sql="SELECT COUNT(*) FROM enrollments",  # → 6
             expected_outcome="Result equals 6",
             fix_hint="Recheck aggregation — may be joining wrong table",
-            is_critical=False,
         )
         exec_result = execute_sql(db_path, "SELECT COUNT(*) FROM students")  # → 3
         assert exec_result.success and exec_result.rows[0][0] == 3
@@ -994,7 +1101,6 @@ async def test_symmetry_test_skip_no_sql():
         # verification_sql intentionally omitted
         expected_outcome="Values match",
         fix_hint="Check aggregation",
-        is_critical=False,
     )
     exec_result = _exec_result([(42,)])
 
@@ -1013,13 +1119,15 @@ async def test_symmetry_test_skip_no_sql():
 
 
 # ---------------------------------------------------------------------------
-# Test 26: expensive tests (column_alignment, boundary, symmetry) all run
-#          when run_expensive=True
+# Test 26: expensive tests (boundary, symmetry) run when run_expensive=True;
+#          column_alignment (now cheap) runs regardless and makes no LLM call
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_expensive_tests_all_run_when_run_expensive_true():
-    """column_alignment, boundary, and symmetry are evaluated when run_expensive=True."""
+    """boundary and symmetry are evaluated when run_expensive=True.
+    column_alignment is now cheap (structural) — no LLM call, runs always.
+    """
     db_path = _make_temp_db()
     try:
         verifier = QueryVerifier()
@@ -1027,16 +1135,15 @@ async def test_expensive_tests_all_run_when_run_expensive_true():
             VerificationTestSpec(
                 test_type="column_alignment",
                 description="Columns answer the question",
-                expected_outcome="Columns are relevant",
+                expected_column_count=1,  # COUNT(*) returns 1 column → pass
+                expected_outcome="1 column returned",
                 fix_hint="Review SELECT list",
-                is_critical=True,
             ),
             VerificationTestSpec(
                 test_type="boundary",
                 description="Date filter is correct",
                 expected_outcome="Date filter matches",
                 fix_hint="Adjust date range",
-                is_critical=False,
             ),
             VerificationTestSpec(
                 test_type="symmetry",
@@ -1044,7 +1151,6 @@ async def test_expensive_tests_all_run_when_run_expensive_true():
                 verification_sql="SELECT COUNT(*) FROM students",  # → 3
                 expected_outcome="Values match",
                 fix_hint="Check aggregation",
-                is_critical=False,
             ),
         ]
         exec_result = execute_sql(db_path, "SELECT COUNT(*) FROM students")  # → 3
@@ -1062,14 +1168,160 @@ async def test_expensive_tests_all_run_when_run_expensive_true():
             )
 
         evaluated_types = {r.test_type for r in eval_result.test_results}
-        # All three expensive tests must be present in results
         assert "column_alignment" in evaluated_types
         assert "boundary" in evaluated_types
         assert "symmetry" in evaluated_types
-        # LLM called only for column_alignment and boundary — symmetry uses SQL, not LLM
-        assert mock_client.generate.call_count == 2
+        # column_alignment is now cheap — only boundary calls the LLM (symmetry uses SQL)
+        assert mock_client.generate.call_count == 1
+        # column_alignment should pass (1 column returned, expected 1)
+        ca_result = next(r for r in eval_result.test_results if r.test_type == "column_alignment")
+        assert ca_result.status == "pass"
     finally:
         os.unlink(db_path)
+
+
+# ---------------------------------------------------------------------------
+# Tests A-E: column_alignment structural column-count tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_column_alignment_pass_structural():
+    """column_alignment passes when actual column count equals expected_column_count."""
+    verifier = QueryVerifier()
+    spec = VerificationTestSpec(
+        test_type="column_alignment",
+        description="Scalar aggregate — expect 1 column",
+        expected_column_count=1,
+        expected_outcome="1 column returned",
+        fix_hint="Return only the aggregate value",
+    )
+    exec_result = _exec_result([(42,)])  # 1 column
+
+    eval_result = await verifier.evaluate_candidate(
+        specs=[spec],
+        candidate_id="test_col_align_pass",
+        sql="SELECT COUNT(*) FROM students",
+        exec_result=exec_result,
+        db_path="/dev/null",
+        run_expensive=False,  # should run anyway — now cheap
+    )
+
+    assert eval_result.all_pass is True
+    ca_result = eval_result.test_results[0]
+    assert ca_result.status == "pass"
+    assert "1" in ca_result.actual_outcome
+
+
+@pytest.mark.asyncio
+async def test_column_alignment_fail_structural():
+    """column_alignment fails when actual column count differs from expected."""
+    verifier = QueryVerifier()
+    spec = VerificationTestSpec(
+        test_type="column_alignment",
+        description="Scalar aggregate — expect 1 column",
+        expected_column_count=1,
+        expected_outcome="1 column returned",
+        fix_hint="Remove extra columns from SELECT",
+    )
+    exec_result = _exec_result([(1, "Alice", 3.9)])  # 3 columns, expected 1
+
+    eval_result = await verifier.evaluate_candidate(
+        specs=[spec],
+        candidate_id="test_col_align_fail",
+        sql="SELECT id, name, gpa FROM students",
+        exec_result=exec_result,
+        db_path="/dev/null",
+        run_expensive=False,
+    )
+
+    assert eval_result.all_pass is False
+    ca_result = eval_result.test_results[0]
+    assert ca_result.status == "fail"
+    assert "3" in ca_result.actual_outcome   # actual count
+    assert "1" in ca_result.actual_outcome   # expected count
+    assert len(eval_result.failure_hints) >= 1
+
+
+@pytest.mark.asyncio
+async def test_column_alignment_skip_when_no_expected_count():
+    """column_alignment skips when expected_column_count is not set."""
+    verifier = QueryVerifier()
+    spec = VerificationTestSpec(
+        test_type="column_alignment",
+        description="Columns answer the question",
+        # expected_column_count intentionally omitted
+        expected_outcome="Correct columns",
+        fix_hint="Review SELECT list",
+    )
+    exec_result = _exec_result([(1, "Alice")])
+
+    eval_result = await verifier.evaluate_candidate(
+        specs=[spec],
+        candidate_id="test_col_align_skip",
+        sql="SELECT id, name FROM students",
+        exec_result=exec_result,
+        db_path="/dev/null",
+        run_expensive=False,
+    )
+
+    ca_result = eval_result.test_results[0]
+    assert ca_result.status == "skip"
+    assert eval_result.all_pass is True  # skip counts as passing
+
+
+@pytest.mark.asyncio
+async def test_column_alignment_skip_on_empty_result():
+    """column_alignment skips when exec_result has no rows."""
+    verifier = QueryVerifier()
+    spec = VerificationTestSpec(
+        test_type="column_alignment",
+        description="Expect 1 column",
+        expected_column_count=1,
+        expected_outcome="1 column",
+        fix_hint="Fix query",
+    )
+    exec_result = _exec_result([])  # no rows
+
+    eval_result = await verifier.evaluate_candidate(
+        specs=[spec],
+        candidate_id="test_col_align_empty",
+        sql="SELECT COUNT(*) FROM students WHERE 1=0",
+        exec_result=exec_result,
+        db_path="/dev/null",
+        run_expensive=False,
+    )
+
+    ca_result = eval_result.test_results[0]
+    assert ca_result.status == "skip"
+
+
+@pytest.mark.asyncio
+async def test_column_alignment_runs_when_run_expensive_false():
+    """column_alignment runs even with run_expensive=False (it is now a cheap test)."""
+    verifier = QueryVerifier()
+    spec = VerificationTestSpec(
+        test_type="column_alignment",
+        description="Expect 2 columns",
+        expected_column_count=2,
+        expected_outcome="2 columns",
+        fix_hint="Add missing column",
+    )
+    exec_result = _exec_result([(1, "Alice"), (2, "Bob")])  # 2 cols per row
+
+    # No mock needed — no LLM call expected
+    eval_result = await verifier.evaluate_candidate(
+        specs=[spec],
+        candidate_id="test_col_align_cheap",
+        sql="SELECT id, name FROM students",
+        exec_result=exec_result,
+        db_path="/dev/null",
+        run_expensive=False,
+    )
+
+    evaluated_types = {r.test_type for r in eval_result.test_results}
+    assert "column_alignment" in evaluated_types
+    ca_result = next(r for r in eval_result.test_results if r.test_type == "column_alignment")
+    assert ca_result.status == "pass"
 
 
 # ---------------------------------------------------------------------------
@@ -1118,3 +1370,150 @@ def test_trace_verif_run_expensive_always_true():
         fix_produced_different_sql=None,
     )
     assert entry_final["verif_run_expensive"] is True
+
+
+# ---------------------------------------------------------------------------
+# New tests: computed_upper_bound / actual_row_count populated on grain result
+# ---------------------------------------------------------------------------
+
+def test_grain_result_has_computed_upper_bound_and_actual_row_count():
+    """_eval_grain populates computed_upper_bound and actual_row_count on fail."""
+    db = _make_temp_db()
+    try:
+        verifier = QueryVerifier()
+        spec = VerificationTestSpec(
+            test_type="grain",
+            description="Should return at most 3 rows (one per student).",
+            # verification_sql_upper: SELECT COUNT(DISTINCT id) FROM students → 3
+            verification_sql_upper="SELECT COUNT(DISTINCT id) FROM students",
+            expected_outcome="Row count ≤ 3",
+            fix_hint="Add DISTINCT or GROUP BY student id.",
+        )
+        # Simulate a bad query returning 6 rows (JOIN multiplication)
+        exec_result = _exec_result([(1, "Alice"), (1, "Alice"), (2, "Bob"),
+                                    (2, "Bob"), (3, "Carol"), (3, "Carol")])
+        result = verifier._eval_grain(spec, exec_result, db)
+        assert result.status == "fail"
+        assert result.computed_upper_bound == 3   # 3 distinct students
+        assert result.actual_row_count == 6
+    finally:
+        import os; os.unlink(db)
+
+
+def test_grain_result_has_computed_upper_bound_on_pass():
+    """_eval_grain also populates fields when the test passes."""
+    db = _make_temp_db()
+    try:
+        verifier = QueryVerifier()
+        spec = VerificationTestSpec(
+            test_type="grain",
+            description="One row per student.",
+            verification_sql_upper="SELECT COUNT(DISTINCT id) FROM students",
+            expected_outcome="Row count ≤ 3",
+            fix_hint="Add GROUP BY.",
+        )
+        exec_result = _exec_result([(1, "Alice"), (2, "Bob"), (3, "Carol")])
+        result = verifier._eval_grain(spec, exec_result, db)
+        assert result.status == "pass"
+        assert result.computed_upper_bound == 3
+        assert result.actual_row_count == 3
+    finally:
+        import os; os.unlink(db)
+
+
+# ---------------------------------------------------------------------------
+# New test: fix prompt includes numeric bound values and duplicate-row hint
+# ---------------------------------------------------------------------------
+
+def test_fix_prompt_grain_shows_numeric_bounds_and_duplicate_hint():
+    """_build_fix_prompt enriches grain failure with numeric values and dup hint."""
+    from src.fixing.query_fixer import QueryFixer
+    from src.schema_linking.schema_linker import LinkedSchemas
+    from dataclasses import dataclass
+
+    @dataclass
+    class _FakeSchemas:
+        s2_ddl: str = "CREATE TABLE students (id INT, name TEXT);"
+
+    # Build a grain VerificationTestResult with computed fields populated
+    grain_result = VerificationTestResult(
+        test_type="grain",
+        status="fail",
+        actual_outcome="Row count 6 exceeds upper bound 3.",
+        is_critical=True,
+        computed_upper_bound=3,
+        actual_row_count=6,
+    )
+    verif_eval = VerificationEvaluation(
+        candidate_id="gen_a_0",
+        test_results=[grain_result],
+        all_pass=False,
+        confidence_adjustment=-0.3,
+        failure_hints=["Grain failed"],
+    )
+    grain_spec = VerificationTestSpec(
+        test_type="grain",
+        description="One row per student.",
+        verification_sql_upper="SELECT COUNT(DISTINCT id) FROM students",
+        expected_outcome="Row count ≤ 3",
+        fix_hint="Add DISTINCT.",
+    )
+
+    # Duplicate rows in result sample
+    exec_result = _exec_result([
+        (1, "Alice"), (1, "Alice"), (2, "Bob"),
+        (2, "Bob"), (3, "Carol"), (3, "Carol"),
+    ])
+
+    prompt = QueryFixer._build_fix_prompt(
+        sql="SELECT s.id, s.name FROM students s JOIN enrollments e ON s.id = e.student_id",
+        question="List all students.",
+        evidence="",
+        schemas=_FakeSchemas(),
+        cell_matches=[],
+        exec_issues=[],
+        verif_eval=verif_eval,
+        verif_specs=[grain_spec],
+        exec_result=exec_result,
+    )
+
+    # Numeric bound values must appear
+    assert "Upper bound value: 3 rows" in prompt
+    assert "Your query returned: 6 rows" in prompt
+    assert "3 extra rows" in prompt or "extra rows" in prompt
+    # The upper bound SQL must appear
+    assert "SELECT COUNT(DISTINCT id) FROM students" in prompt
+    # Duplicate-row hint must appear because sample has identical rows
+    assert "identical rows" in prompt
+    assert "duplicated" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Tests for ordering helper functions (_extract_limit_from_question,
+# _derive_direction_from_question)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("question,expected_n", [
+    ("Who are the top 5 students by GPA?", 5),
+    ("List the top 1 student.", 1),
+    ("Find the 3 highest scoring players.", 3),
+    ("What are the lowest 2 prices?", 2),
+    ("List the bottom 10 products by rating.", 10),
+    ("Which student has the highest GPA?", None),   # no N
+    ("What is the average score?", None),            # no ordering at all
+])
+def test_extract_limit_from_question(question, expected_n):
+    assert _extract_limit_from_question(question) == expected_n
+
+
+@pytest.mark.parametrize("question,expected_dir", [
+    ("Who are the top 5 students by GPA?", "DESC"),
+    ("Which student has the highest score?", "DESC"),
+    ("Find the best 3 players.", "DESC"),
+    ("What are the 3 lowest prices?", "ASC"),
+    ("List the worst performing teams.", "ASC"),
+    ("Find the smallest 2 values.", "ASC"),
+    ("How many students enrolled?", None),   # ambiguous / no ordering keywords
+])
+def test_derive_direction_from_question(question, expected_dir):
+    assert _derive_direction_from_question(question) == expected_dir
