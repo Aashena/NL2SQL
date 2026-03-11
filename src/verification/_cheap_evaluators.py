@@ -21,12 +21,27 @@ _eval_scale      — numeric result values within expected range
 from __future__ import annotations
 
 import logging
+import re
 from typing import Optional
 
 from src.data.database import ExecutionResult, execute_sql
 from src.verification._models import VerificationTestResult
 
 logger = logging.getLogger(__name__)
+
+
+def _is_safe_verification_sql(sql: str) -> bool:
+    """Return True for any safe read-only SELECT query (no DDL/DML).
+
+    The COUNT requirement was removed: the grain prompt still instructs the model
+    to use COUNT queries, but valid upper-bound queries such as `SELECT 1` or
+    subquery-based SELECTs without a top-level COUNT token are also safe to run.
+    """
+    s = sql.strip().upper()
+    return s.startswith("SELECT") and not any(
+        kw in s
+        for kw in ("INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER", "ATTACH")
+    )
 
 
 class CheapEvaluatorMixin:
@@ -40,30 +55,65 @@ class CheapEvaluatorMixin:
     ) -> VerificationTestResult:
         """Grain test: check result row count is within [lower, upper] and
         optionally that column count matches expected."""
+        # Skip the entire grain test when LLM signalled it could not determine a bound
+        if spec.upper_bound_confidence == "none":
+            return VerificationTestResult(
+                test_type="grain",
+                status="skip",
+                actual_outcome="Skipped — LLM could not determine a meaningful upper bound.",
+                is_critical=False,
+            )
+
         actual_count = len(exec_result.rows)
+
+        # ── 0. Resolve lower bound (must precede upper-bound resolution) ──────
+        # Default to 1; allow explicit 0 for questions that may return no rows.
+        lower: int = max(spec.row_count_min if spec.row_count_min is not None else 1, 0)
 
         # ── 1. Resolve upper bound ──────────────────────────────────────────
         upper: Optional[int] = None
 
         if spec.verification_sql_upper:
-            vr = execute_sql(db_path, spec.verification_sql_upper)
-            if vr.success and vr.rows and isinstance(vr.rows[0][0], (int, float)):
-                upper = int(vr.rows[0][0])
+            if not _is_safe_verification_sql(spec.verification_sql_upper):
+                logger.warning(
+                    "Grain verification_sql_upper rejected by safety check (not a SELECT COUNT): %r",
+                    spec.verification_sql_upper[:120],
+                )
+            else:
+                vr = execute_sql(db_path, spec.verification_sql_upper)
+                if vr.success and vr.rows and isinstance(vr.rows[0][0], (int, float)):
+                    raw_upper = int(vr.rows[0][0])
+                    if raw_upper == 0 and lower > 0:
+                        # A COUNT of 0 almost certainly means the verification query
+                        # itself is wrong (hallucinated table name, impossible condition).
+                        # Skip the upper-bound check rather than falsely failing every
+                        # non-empty result.
+                        logger.warning(
+                            "Grain verification_sql_upper returned 0 (lower=%d) — "
+                            "skipping upper-bound check (verification query likely wrong): %r",
+                            lower,
+                            spec.verification_sql_upper[:120],
+                        )
+                    else:
+                        upper = raw_upper
         elif spec.verification_sql:
             # Backward compat: old verification_sql treated as upper bound for grain
-            vr = execute_sql(db_path, spec.verification_sql)
-            if vr.success and vr.rows and isinstance(vr.rows[0][0], (int, float)):
-                upper = int(vr.rows[0][0])
-        elif spec.row_count_max is not None:
-            upper = spec.row_count_max
+            if _is_safe_verification_sql(spec.verification_sql):
+                vr = execute_sql(db_path, spec.verification_sql)
+                if vr.success and vr.rows and isinstance(vr.rows[0][0], (int, float)):
+                    raw_upper = int(vr.rows[0][0])
+                    if raw_upper == 0 and lower > 0:
+                        logger.warning(
+                            "Grain verification_sql returned 0 (lower=%d) — skipping upper-bound check",
+                            lower,
+                        )
+                    else:
+                        upper = raw_upper
         elif spec.expected_row_count is not None:
             # Legacy exact-match: treat as upper = expected
             upper = spec.expected_row_count
 
-        # ── 2. Resolve lower bound (minimum is always 1) ───────────────────
-        lower: int = max(spec.row_count_min if spec.row_count_min is not None else 1, 1)
-
-        # ── 3. Row count check ─────────────────────────────────────────────
+        # ── 2. Row count check ─────────────────────────────────────────────
         row_count_ok: Optional[bool] = None
         row_count_msg: str = ""
 
@@ -79,11 +129,21 @@ class CheapEvaluatorMixin:
                     f"Row count {actual_count} is below minimum {lower}. "
                     "Result may be too restrictive or missing rows."
                 )
+                spec.fix_hint = (
+                    f"Result returned {actual_count} rows but at least {lower} are expected. "
+                    "The WHERE clause may be too restrictive, a JOIN condition may eliminate "
+                    "valid rows, or HAVING may filter out groups that should appear."
+                )
             else:
                 row_count_ok = False
                 row_count_msg = (
                     f"Row count {actual_count} exceeds upper bound {upper}. "
                     "Possible wrong grain or missing GROUP BY / DISTINCT."
+                )
+                spec.fix_hint = (
+                    f"Result returned {actual_count} rows but the grain upper bound is {upper}. "
+                    "Add DISTINCT to SELECT or GROUP BY the primary entity to collapse duplicates. "
+                    "Check for fan-out JOINs (one entity → many rows in joined table)."
                 )
         else:
             # No upper bound — only enforce lower
@@ -96,8 +156,13 @@ class CheapEvaluatorMixin:
                     f"Row count {actual_count} is below minimum {lower} "
                     "(empty results are always wrong)."
                 )
+                spec.fix_hint = (
+                    f"Result returned {actual_count} rows but at least {lower} are expected. "
+                    "The WHERE clause may be too restrictive, a JOIN condition may eliminate "
+                    "valid rows, or HAVING may filter out groups that should appear."
+                )
 
-        # ── 4. Column count check (independent of row count) ───────────────
+        # ── 3. Column count check (independent of row count) ───────────────
         col_count_ok: Optional[bool] = None
         col_count_msg: str = ""
 
@@ -116,7 +181,7 @@ class CheapEvaluatorMixin:
                     f"{spec.expected_column_count}. Check SELECT list."
                 )
 
-        # ── 5. Combine results ─────────────────────────────────────────────
+        # ── 4. Combine results ─────────────────────────────────────────────
         if row_count_ok is None and col_count_ok is None:
             return VerificationTestResult(
                 test_type="grain",
@@ -164,7 +229,13 @@ class CheapEvaluatorMixin:
         spec,  # VerificationTestSpec
         exec_result: ExecutionResult,
     ) -> VerificationTestResult:
-        """Null test: check result rows for unexpected NULL values."""
+        """Null test: check result rows for unexpected NULL values.
+
+        When check_columns is specified, we only fail if more than 10% of cells
+        across the first len(check_columns) columns contain NULLs — this avoids
+        false positives from LEFT JOIN columns that are intentionally NULL in
+        some rows.  When check_columns is absent, any NULL triggers a fail.
+        """
         rows = exec_result.rows
         if not rows:
             return VerificationTestResult(
@@ -174,26 +245,64 @@ class CheapEvaluatorMixin:
                 is_critical=False,
             )
 
+        check_columns = spec.check_columns or []
         null_count = sum(1 for row in rows for val in row if val is None)
         total_cells = sum(len(row) for row in rows)
+        null_pct = (null_count / total_cells * 100) if total_cells > 0 else 0
 
-        if null_count == 0:
+        if check_columns:
+            # check_columns are specified but we cannot reliably map column names to
+            # result positions without SQL parsing. Instead, apply a lenient threshold
+            # over ALL cells: only fail when > 10% of cells are NULL.  This tolerates
+            # incidental NULLs in non-checked columns (e.g. from LEFT JOINs) while
+            # still catching queries where a significant fraction of rows are missing data.
+            null_threshold_pct = 10.0
+            col_hint = f" (checking columns: {', '.join(check_columns)})"
+            if null_count == 0:
+                return VerificationTestResult(
+                    test_type="null",
+                    status="pass",
+                    actual_outcome=f"No NULL values in {len(rows)} result rows{col_hint}.",
+                    is_critical=False,
+                )
+            if null_pct <= null_threshold_pct:
+                return VerificationTestResult(
+                    test_type="null",
+                    status="pass",
+                    actual_outcome=(
+                        f"Found {null_count} NULL values ({null_pct:.1f}% of cells) "
+                        f"— below threshold{col_hint}."
+                    ),
+                    is_critical=False,
+                )
             return VerificationTestResult(
                 test_type="null",
-                status="pass",
-                actual_outcome=f"No NULL values in {len(rows)} result rows.",
+                status="fail",
+                actual_outcome=(
+                    f"Found {null_count} NULL values in {len(rows)} rows "
+                    f"({null_pct:.1f}% of cells){col_hint}. "
+                    "May indicate missing JOIN conditions or wrong column selected."
+                ),
                 is_critical=False,
             )
-        null_pct = (null_count / total_cells * 100) if total_cells > 0 else 0
-        return VerificationTestResult(
-            test_type="null",
-            status="fail",
-            actual_outcome=(
-                f"Found {null_count} NULL values across {len(rows)} rows "
-                f"({null_pct:.1f}% of cells). May indicate missing JOIN conditions."
-            ),
-            is_critical=False,
-        )
+        else:
+            # No check_columns specified — fail on any NULL (strict behaviour)
+            if null_count == 0:
+                return VerificationTestResult(
+                    test_type="null",
+                    status="pass",
+                    actual_outcome=f"No NULL values in {len(rows)} result rows.",
+                    is_critical=False,
+                )
+            return VerificationTestResult(
+                test_type="null",
+                status="fail",
+                actual_outcome=(
+                    f"Found {null_count} NULL values across {len(rows)} rows "
+                    f"({null_pct:.1f}% of cells). May indicate missing JOIN conditions."
+                ),
+                is_critical=False,
+            )
 
     def _eval_duplicate(
         self,
@@ -274,21 +383,42 @@ class CheapEvaluatorMixin:
         sql: str,
     ) -> VerificationTestResult:
         """Ordering test: structural check that required SQL clauses are present."""
-        required = spec.required_sql_keywords or ["ORDER BY", "LIMIT"]
+        # Only require LIMIT in the fallback when an explicit order_limit count is set;
+        # for superlatives without a count ('which X has the highest Y?') ORDER BY alone suffices.
+        default_keywords = ["ORDER BY", "LIMIT"] if spec.order_limit else ["ORDER BY"]
+        required = spec.required_sql_keywords or default_keywords
         sql_upper = sql.upper()
         missing = [kw for kw in required if kw.upper() not in sql_upper]
 
-        if not missing:
+        if missing:
             return VerificationTestResult(
                 test_type="ordering",
-                status="pass",
-                actual_outcome=f"All required clauses present: {required}.",
+                status="fail",
+                actual_outcome=f"Missing required SQL clauses: {missing}.",
                 is_critical=False,
             )
+
+        # Additional check: if an explicit order_limit N was specified, verify that
+        # any LIMIT clause in the SQL is at least N (not a smaller value).
+        if spec.order_limit and "LIMIT" in sql_upper:
+            limit_match = re.search(r"\bLIMIT\s+(\d+)", sql, re.IGNORECASE)
+            if limit_match:
+                actual_limit = int(limit_match.group(1))
+                if actual_limit < spec.order_limit:
+                    return VerificationTestResult(
+                        test_type="ordering",
+                        status="fail",
+                        actual_outcome=(
+                            f"LIMIT {actual_limit} is less than the required {spec.order_limit} "
+                            f"rows. Query returns fewer rows than the question demands."
+                        ),
+                        is_critical=False,
+                    )
+
         return VerificationTestResult(
             test_type="ordering",
-            status="fail",
-            actual_outcome=f"Missing required SQL clauses: {missing}.",
+            status="pass",
+            actual_outcome=f"All required clauses present: {required}.",
             is_critical=False,
         )
 

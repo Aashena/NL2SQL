@@ -116,7 +116,8 @@ async def test_generate_plan_returns_structured_tests():
 
     verifier = QueryVerifier()
     with (
-        patch.object(verifier, "_generate_main_plan", AsyncMock(return_value=[grain_spec, ordering_spec])),
+        patch.object(verifier, "_generate_grain_spec", AsyncMock(return_value=grain_spec)),
+        patch.object(verifier, "_generate_optional_tests", AsyncMock(return_value=[ordering_spec])),
         patch.object(verifier, "_generate_column_alignment_spec", AsyncMock(return_value=col_align_spec)),
     ):
         specs = await verifier.generate_plan(
@@ -255,7 +256,7 @@ async def test_generate_column_alignment_spec_llm_failure():
 
 @pytest.mark.asyncio
 async def test_generate_column_alignment_spec_mismatched_descriptions():
-    """column_descriptions with wrong length → cleared to [] gracefully."""
+    """column_descriptions with wrong length → truncated to count (not discarded)."""
     mock_client = AsyncMock()
     mock_client.generate = AsyncMock(
         return_value=LLMResponse(
@@ -279,7 +280,8 @@ async def test_generate_column_alignment_spec_mismatched_descriptions():
         )
 
     assert spec.expected_column_count == 1
-    assert spec.column_descriptions == []
+    # Partial descriptions are now kept (truncated to count) rather than discarded
+    assert spec.column_descriptions == ["col1"]
 
 
 # ---------------------------------------------------------------------------
@@ -726,31 +728,32 @@ async def test_evaluation_error_becomes_error_no_penalty():
 
 @pytest.mark.asyncio
 async def test_grain_range_pass():
-    """Grain test passes when actual row count is within [row_count_min, row_count_max]."""
-    verifier = QueryVerifier()
-    spec = VerificationTestSpec(
-        test_type="grain",
-        description="Between 2 and 5 rows expected",
-        row_count_min=2,
-        row_count_max=5,
-        expected_outcome="Result has 2-5 rows",
-        fix_hint="Review GROUP BY",
-    )
-    exec_result = _exec_result([(1,), (2,), (3,)])  # 3 rows
+    """Grain test passes when actual row count is within [row_count_min, upper_bound]."""
+    db_path = _make_temp_db()
+    try:
+        verifier = QueryVerifier()
+        spec = VerificationTestSpec(
+            test_type="grain",
+            row_count_min=2,
+            verification_sql_upper="SELECT 5",  # returns 5 as upper bound
+        )
+        exec_result = _exec_result([(1,), (2,), (3,)])  # 3 rows
 
-    eval_result = await verifier.evaluate_candidate(
-        specs=[spec],
-        candidate_id="test_range_pass",
-        sql="SELECT id FROM students",
-        exec_result=exec_result,
-        db_path="/dev/null",
-        run_expensive=False,
-    )
+        eval_result = await verifier.evaluate_candidate(
+            specs=[spec],
+            candidate_id="test_range_pass",
+            sql="SELECT id FROM students",
+            exec_result=exec_result,
+            db_path=db_path,
+            run_expensive=False,
+        )
 
-    assert eval_result.all_pass is True
-    grain_result = eval_result.test_results[0]
-    assert grain_result.status == "pass"
-    assert "within range [2, 5]" in grain_result.actual_outcome
+        assert eval_result.all_pass is True
+        grain_result = eval_result.test_results[0]
+        assert grain_result.status == "pass"
+        assert "within range [2, 5]" in grain_result.actual_outcome
+    finally:
+        os.unlink(db_path)
 
 
 # ---------------------------------------------------------------------------
@@ -759,36 +762,76 @@ async def test_grain_range_pass():
 
 @pytest.mark.asyncio
 async def test_grain_range_fail_below_min():
-    """Grain test fails when result has 0 rows (always below minimum of 1)."""
-    verifier = QueryVerifier()
-    spec = VerificationTestSpec(
-        test_type="grain",
-        description="At least 1 row expected",
-        row_count_min=1,
-        row_count_max=5,
-        expected_outcome="Non-empty result",
-        fix_hint="Check WHERE clause — may filter out all rows",
-    )
-    exec_result = _exec_result([])  # 0 rows
+    """Grain test fails when result has 0 rows (below the minimum of 1)."""
+    db_path = _make_temp_db()
+    try:
+        verifier = QueryVerifier()
+        spec = VerificationTestSpec(
+            test_type="grain",
+            row_count_min=1,
+            verification_sql_upper="SELECT 5",  # upper bound = 5
+        )
+        exec_result = _exec_result([])  # 0 rows
 
-    eval_result = await verifier.evaluate_candidate(
-        specs=[spec],
-        candidate_id="test_range_fail_below",
-        sql="SELECT id FROM students WHERE 1=0",
-        exec_result=exec_result,
-        db_path="/dev/null",
-        run_expensive=False,
-    )
+        eval_result = await verifier.evaluate_candidate(
+            specs=[spec],
+            candidate_id="test_range_fail_below",
+            sql="SELECT id FROM students WHERE 1=0",
+            exec_result=exec_result,
+            db_path=db_path,
+            run_expensive=False,
+        )
 
-    assert eval_result.all_pass is False
-    grain_result = eval_result.test_results[0]
-    assert grain_result.status == "fail"
-    assert "below minimum 1" in grain_result.actual_outcome
+        assert eval_result.all_pass is False
+        grain_result = eval_result.test_results[0]
+        assert grain_result.status == "fail"
+        assert "below minimum 1" in grain_result.actual_outcome
+    finally:
+        os.unlink(db_path)
 
 
 # ---------------------------------------------------------------------------
 # Test 17: grain range FAIL — actual exceeds upper bound from verification_sql_upper
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Test 16b: grain row_count_min=0 — zero rows is acceptable
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_grain_min_zero_allows_empty_result():
+    """Grain test passes when row_count_min=0 and the result is empty.
+
+    Some questions may legitimately return no rows (e.g. 'List students with
+    GPA above 4.5' when none exist). Setting row_count_min=0 disables the
+    default lower-bound of 1 and allows an empty result set to pass.
+    """
+    db_path = _make_temp_db()
+    try:
+        verifier = QueryVerifier()
+        spec = VerificationTestSpec(
+            test_type="grain",
+            row_count_min=0,  # empty result is acceptable
+            verification_sql_upper="SELECT 5",  # upper bound = 5
+        )
+        exec_result = _exec_result([])  # 0 rows — should PASS with min=0
+
+        eval_result = await verifier.evaluate_candidate(
+            specs=[spec],
+            candidate_id="test_min_zero",
+            sql="SELECT id FROM students WHERE gpa > 4.5",
+            exec_result=exec_result,
+            db_path=db_path,
+            run_expensive=False,
+        )
+
+        assert eval_result.all_pass is True
+        grain_result = eval_result.test_results[0]
+        assert grain_result.status == "pass"
+        assert "0" in grain_result.actual_outcome  # actual row count
+    finally:
+        os.unlink(db_path)
+
 
 @pytest.mark.asyncio
 async def test_grain_range_fail_above_max():
@@ -902,34 +945,35 @@ async def test_grain_column_count_fail():
 @pytest.mark.asyncio
 async def test_grain_combined_fail():
     """Grain test fails with combined message when both row count and column count are wrong."""
-    verifier = QueryVerifier()
-    spec = VerificationTestSpec(
-        test_type="grain",
-        description="Expect ≤2 rows and 3 columns",
-        row_count_max=2,
-        expected_column_count=3,
-        expected_outcome="≤2 rows, 3 cols",
-        fix_hint="Fix both grain and SELECT list",
-    )
-    # 5 rows with 1 column each — violates both constraints
-    exec_result = _exec_result([(x,) for x in range(5)])
+    db_path = _make_temp_db()
+    try:
+        verifier = QueryVerifier()
+        spec = VerificationTestSpec(
+            test_type="grain",
+            verification_sql_upper="SELECT 2",  # upper bound = 2
+            expected_column_count=3,
+        )
+        # 5 rows with 1 column each — violates both constraints
+        exec_result = _exec_result([(x,) for x in range(5)])
 
-    eval_result = await verifier.evaluate_candidate(
-        specs=[spec],
-        candidate_id="test_combined_fail",
-        sql="SELECT id FROM students",
-        exec_result=exec_result,
-        db_path="/dev/null",
-        run_expensive=False,
-    )
+        eval_result = await verifier.evaluate_candidate(
+            specs=[spec],
+            candidate_id="test_combined_fail",
+            sql="SELECT id FROM students",
+            exec_result=exec_result,
+            db_path=db_path,
+            run_expensive=False,
+        )
 
-    assert eval_result.all_pass is False
-    grain_result = eval_result.test_results[0]
-    assert grain_result.status == "fail"
-    # Both violations appear in the combined message
-    assert "|" in grain_result.actual_outcome
-    assert "5" in grain_result.actual_outcome   # actual row count
-    assert "2" in grain_result.actual_outcome   # row_count_max
+        assert eval_result.all_pass is False
+        grain_result = eval_result.test_results[0]
+        assert grain_result.status == "fail"
+        # Both violations appear in the combined message
+        assert "|" in grain_result.actual_outcome
+        assert "5" in grain_result.actual_outcome   # actual row count
+        assert "2" in grain_result.actual_outcome   # upper bound
+    finally:
+        os.unlink(db_path)
 
 
 # ---------------------------------------------------------------------------
@@ -939,32 +983,33 @@ async def test_grain_combined_fail():
 @pytest.mark.asyncio
 async def test_grain_combined_pass():
     """Grain test passes when both row count and column count constraints are met."""
-    verifier = QueryVerifier()
-    spec = VerificationTestSpec(
-        test_type="grain",
-        description="Expect 1-5 rows and 2 columns",
-        row_count_min=1,
-        row_count_max=5,
-        expected_column_count=2,
-        expected_outcome="1-5 rows, 2 cols",
-        fix_hint="Fix SELECT list or GROUP BY",
-    )
-    exec_result = _exec_result([(1, "Alice"), (2, "Bob"), (3, "Carol")])  # 3 rows, 2 cols
+    db_path = _make_temp_db()
+    try:
+        verifier = QueryVerifier()
+        spec = VerificationTestSpec(
+            test_type="grain",
+            row_count_min=1,
+            verification_sql_upper="SELECT 5",  # upper bound = 5
+            expected_column_count=2,
+        )
+        exec_result = _exec_result([(1, "Alice"), (2, "Bob"), (3, "Carol")])  # 3 rows, 2 cols
 
-    eval_result = await verifier.evaluate_candidate(
-        specs=[spec],
-        candidate_id="test_combined_pass",
-        sql="SELECT id, name FROM students",
-        exec_result=exec_result,
-        db_path="/dev/null",
-        run_expensive=False,
-    )
+        eval_result = await verifier.evaluate_candidate(
+            specs=[spec],
+            candidate_id="test_combined_pass",
+            sql="SELECT id, name FROM students",
+            exec_result=exec_result,
+            db_path=db_path,
+            run_expensive=False,
+        )
 
-    assert eval_result.all_pass is True
-    grain_result = eval_result.test_results[0]
-    assert grain_result.status == "pass"
-    assert "within range [1, 5]" in grain_result.actual_outcome
-    assert "Column count 2" in grain_result.actual_outcome
+        assert eval_result.all_pass is True
+        grain_result = eval_result.test_results[0]
+        assert grain_result.status == "pass"
+        assert "within range [1, 5]" in grain_result.actual_outcome
+        assert "Column count 2" in grain_result.actual_outcome
+    finally:
+        os.unlink(db_path)
 
 
 # ---------------------------------------------------------------------------

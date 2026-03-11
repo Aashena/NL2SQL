@@ -286,12 +286,99 @@ def _to_gemini_tool(t: ToolParam) -> dict[str, Any]:
     """Convert a ToolParam to a Gemini function_declaration dict.
 
     Gemini uses "parameters" where Anthropic uses "input_schema" — same JSON Schema object.
+    Gemini's SDK validates schemas with Pydantic and rejects several standard JSON Schema
+    keywords (oneOf, additionalProperties, const, minLength), so we sanitize them first.
     """
     return {
         "name": t.name,
         "description": t.description,
-        "parameters": t.input_schema,
+        "parameters": _sanitize_schema_for_gemini(t.input_schema),
     }
+
+
+def _sanitize_schema_for_gemini(schema: Any) -> Any:
+    """Recursively remove JSON Schema keywords unsupported by Gemini's SDK.
+
+    Transformations applied:
+      - ``oneOf``            → merge all variant ``properties`` into one permissive object
+      - ``additionalProperties`` → removed (Gemini rejects it)
+      - ``const: v``         → ``enum: [v]``  (Gemini only supports enum syntax)
+      - ``minLength``        → removed
+      - ``maxLength``        → removed
+    """
+    if not isinstance(schema, dict):
+        return schema
+
+    result: dict[str, Any] = {}
+    for key, value in schema.items():
+        if key == "oneOf":
+            # Merge all oneOf variants into a single permissive object schema so the
+            # Gemini SDK sees a plain Schema object rather than an unsupported keyword.
+            merged = _merge_one_of(value)
+            result.update(merged)
+        elif key in ("additionalProperties", "minLength", "maxLength"):
+            pass  # unsupported — drop silently
+        elif key == "const":
+            result["enum"] = [value]
+        elif isinstance(value, dict):
+            result[key] = _sanitize_schema_for_gemini(value)
+        elif isinstance(value, list):
+            result[key] = [
+                _sanitize_schema_for_gemini(item) if isinstance(item, dict) else item
+                for item in value
+            ]
+        else:
+            result[key] = value
+
+    return result
+
+
+def _merge_one_of(variants: list[Any]) -> dict[str, Any]:
+    """Merge a list of oneOf object schemas into a single permissive object schema.
+
+    All properties from every variant are gathered into a single ``properties``
+    dict.  No field is marked ``required`` in the merged schema — the LLM is
+    guided by the tool description and system prompt instead.
+
+    When the same property appears in multiple variants with different ``enum``
+    values (e.g. ``test_type`` with ``const: "grain"`` / ``const: "null"`` / …),
+    the enum lists are merged so Gemini knows all valid values are allowed.
+    """
+    if not variants:
+        return {"type": "object"}
+
+    merged_properties: dict[str, Any] = {}
+    for variant in variants:
+        if not isinstance(variant, dict):
+            continue
+        for prop_name, prop_schema in variant.get("properties", {}).items():
+            sanitized = _sanitize_schema_for_gemini(prop_schema)
+            if prop_name not in merged_properties:
+                merged_properties[prop_name] = sanitized
+            else:
+                # When both schemas carry enum values (e.g. test_type with one const
+                # value per variant), merge them so Gemini sees all legal values.
+                existing = merged_properties[prop_name]
+                new_enums = sanitized.get("enum", [])
+                existing_enums = existing.get("enum", [])
+                if new_enums and existing_enums:
+                    merged_properties[prop_name] = {
+                        **existing,
+                        "enum": existing_enums + [v for v in new_enums if v not in existing_enums],
+                    }
+
+    # Propagate fields that are required in every variant (intersection).
+    all_required: list[set[str]] = [
+        set(v.get("required", [])) for v in variants if isinstance(v, dict)
+    ]
+    common_required = sorted(set.intersection(*all_required)) if all_required else []
+
+    result: dict[str, Any] = {"type": "object"}
+    if merged_properties:
+        result["properties"] = merged_properties
+    if common_required:
+        result["required"] = common_required
+    return result
 
 
 def _to_gemini_contents(messages: list[dict[str, Any]], types: Any) -> list[Any]:
@@ -325,16 +412,11 @@ def _parse_response(raw: Any) -> LLMResponse:
         raise LLMError("Gemini returned no candidates")
 
     candidate = raw.candidates[0]
-    if candidate.content is None:
-        finish_reason = getattr(candidate, "finish_reason", "UNKNOWN")
-        raise LLMError(
-            f"Gemini candidate has no content (finish_reason={finish_reason})"
-        )
-
     finish_reason = str(getattr(candidate, "finish_reason", "UNKNOWN"))
 
-    # Detect MALFORMED_FUNCTION_CALL immediately — retrying with the same
-    # prompt will not help; callers should apply prompt simplification instead.
+    # Detect MALFORMED_FUNCTION_CALL before checking content — the content field
+    # is often None when this finish_reason is set, so we must check it first.
+    # Retrying with the same prompt will not help; callers should simplify the schema.
     if "MALFORMED_FUNCTION_CALL" in finish_reason:
         get_tracker().record(FallbackEvent(
             component="gemini_client",
@@ -345,6 +427,11 @@ def _parse_response(raw: Any) -> LLMResponse:
         ))
         raise LLMMalformedToolError(
             f"Gemini returned MALFORMED_FUNCTION_CALL (finish_reason={finish_reason})"
+        )
+
+    if candidate.content is None:
+        raise LLMError(
+            f"Gemini candidate has no content (finish_reason={finish_reason})"
         )
 
     for part in (candidate.content.parts or []):

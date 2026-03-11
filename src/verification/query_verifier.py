@@ -53,6 +53,7 @@ from typing import Optional
 from src.config.settings import settings
 from src.data.database import ExecutionResult, execute_sql
 from src.llm import CacheableText, LLMError, get_client  # patch target — keep here
+from src.llm.base import LLMMalformedToolError
 from src.llm.base import ToolParam, sanitize_prompt_text
 
 # ---------------------------------------------------------------------------
@@ -84,13 +85,25 @@ from src.verification._models import (  # noqa: F401
 from src.verification._llm_schemas import (  # noqa: F401
     _COLUMN_ALIGNMENT_SYSTEM,
     _COLUMN_ALIGNMENT_TOOL,
-    _PLAN_SYSTEM,
-    _PLAN_TOOL,
+    _GRAIN_SYSTEM,
+    _GRAIN_TOOL,
+    _OPTIONAL_TESTS_SYSTEM,
+    _OPTIONAL_TESTS_TOOL,
+    _PLAN_SYSTEM,   # backward-compat alias
+    _PLAN_TOOL,     # backward-compat alias
 )
 from src.verification._cheap_evaluators import CheapEvaluatorMixin
 from src.verification._expensive_evaluators import ExpensiveEvaluatorMixin
 
 logger = logging.getLogger(__name__)
+
+
+def _default_grain_spec() -> VerificationTestSpec:
+    """Return a bare-bones grain spec used as a fallback when LLM calls fail."""
+    return VerificationTestSpec(
+        test_type="grain",
+        fix_hint="Ensure the query returns rows. Check WHERE clause, JOINs, and GROUP BY.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -107,15 +120,16 @@ class QueryVerifier(CheapEvaluatorMixin, ExpensiveEvaluatorMixin):
     Structural-but-async methods (_eval_column_alignment, _eval_symmetry)
     come from ExpensiveEvaluatorMixin.
 
-    LLM-calling methods (_generate_main_plan, _generate_column_alignment_spec,
-    _eval_boundary) are defined directly on this class so that test patches
-    on ``src.verification.query_verifier.get_client`` intercept them correctly.
+    LLM-calling methods (_generate_grain_spec, _generate_optional_tests,
+    _generate_column_alignment_spec, _eval_boundary) are defined directly on
+    this class so that test patches on
+    ``src.verification.query_verifier.get_client`` intercept them correctly.
 
     Workflow::
 
         verifier = QueryVerifier()
 
-        # Once per question (runs two LLM calls concurrently):
+        # Once per question (runs three LLM calls concurrently):
         specs = await verifier.generate_plan(question, evidence, schema)
 
         # Per candidate, per fix iteration:
@@ -127,78 +141,171 @@ class QueryVerifier(CheapEvaluatorMixin, ExpensiveEvaluatorMixin):
 
     @staticmethod
     def _default_plan_no_col_alignment() -> list[VerificationTestSpec]:
-        """Fallback for the main plan when LLM returns empty: grain only."""
-        return [
-            VerificationTestSpec(
-                test_type="grain",
-                fix_hint="Ensure the query returns rows. Check WHERE clause, JOINs, and GROUP BY.",
-            ),
-        ]
+        """Backward-compat alias — returns a default grain-only spec list."""
+        return [_default_grain_spec()]
 
-    async def _generate_main_plan(
+    async def _generate_grain_spec(
+        self,
+        question: str,
+        evidence: str,
+        schema: str,
+    ) -> VerificationTestSpec:
+        """
+        Dedicated LLM call (model_fast) that generates the grain test only.
+
+        The grain tool schema has verification_sql_upper as a required field,
+        so the LLM is forced to always provide a bounding COUNT query.
+        Falls back to a default grain spec on any LLM failure.
+        """
+        q = sanitize_prompt_text(question)
+        ev = sanitize_prompt_text(evidence or "None")
+        # TODO: schema is truncated at 3000 chars which can cut mid-table-definition,
+        # causing the LLM to hallucinate table/column names not present in the schema.
+        # Future fix: pass only the most relevant tables (e.g. top-K by BM25 relevance).
+        schema_abbrev = sanitize_prompt_text(schema[:3000])
+
+        user_msg = (
+            f"Question: {q}\n"
+            f"Evidence: {ev}\n\n"
+            f"Database Schema:\n{schema_abbrev}\n\n"
+            "Generate the grain verification test for this question. "
+            "Use ONLY table and column names from the Database Schema above "
+            "in your verification_sql_upper. Call grain_verification now."
+        )
+
+        try:
+            client = get_client()
+            _grain_call_kwargs = dict(
+                model=settings.model_fast,
+                system=[_GRAIN_SYSTEM],
+                messages=[{"role": "user", "content": user_msg}],
+                tools=[_GRAIN_TOOL],
+                tool_choice_name="grain_verification",
+                temperature=0.0,
+                max_tokens=800,
+            )
+            response = await client.generate(**_grain_call_kwargs)
+            if not response.tool_inputs:
+                logger.warning(
+                    "Grain LLM returned no tool inputs (finish_reason=%s) — using default grain spec",
+                    response.finish_reason,
+                )
+                return _default_grain_spec()
+            data = response.tool_inputs[0]
+            raw_sql_upper = data.get("verification_sql_upper") or None
+            if "verification_sql_upper" in data and not raw_sql_upper:
+                logger.warning(
+                    "Grain LLM returned empty verification_sql_upper (required field) — "
+                    "grain upper bound will be skipped"
+                )
+            _valid_grain_conf = {"high", "medium", "low", "none"}
+            raw_conf = data.get("upper_bound_confidence") or "none"
+            if raw_conf not in _valid_grain_conf:
+                logger.warning(
+                    "Grain LLM returned invalid upper_bound_confidence %r — defaulting to 'none'",
+                    raw_conf,
+                )
+                raw_conf = "none"
+            return VerificationTestSpec(
+                test_type="grain",
+                verification_sql_upper=raw_sql_upper,
+                upper_bound_confidence=raw_conf,
+                row_count_min=data.get("row_count_min"),
+            )
+        except LLMError as exc:
+            logger.warning("Grain spec LLM failed (LLMError): %s — using default grain spec", exc)
+            return _default_grain_spec()
+        except Exception as exc:
+            logger.warning("Unexpected error in _generate_grain_spec: %s — using default grain spec", exc)
+            return _default_grain_spec()
+
+    async def _generate_optional_tests(
         self,
         question: str,
         evidence: str,
         schema: str,
     ) -> list[VerificationTestSpec]:
         """
-        Generate all verification tests EXCEPT column_alignment (model_powerful).
+        Dedicated LLM call (model_powerful) for optional tests: null, duplicate,
+        ordering, scale, boundary, symmetry. Grain is excluded from this call.
 
-        Returns a list containing grain and any applicable optional tests.
-        Falls back to a default grain-only plan on LLM failure.
+        Returns an empty list on any LLM failure — the grain spec is unaffected.
         """
         q = sanitize_prompt_text(question)
         ev = sanitize_prompt_text(evidence or "None")
-        schema_abbrev = schema[:3000]
+        schema_abbrev = sanitize_prompt_text(schema[:3000])
 
         user_msg = (
             f"Question: {q}\n"
             f"Evidence: {ev}\n\n"
             f"Database Schema:\n{schema_abbrev}\n\n"
-            "Generate the verification tests for this question."
+            "Generate the optional verification tests for this question."
         )
 
         try:
             client = get_client()
             response = await client.generate(
                 model=settings.model_powerful,
-                system=[_PLAN_SYSTEM],
+                system=[_OPTIONAL_TESTS_SYSTEM],
                 messages=[{"role": "user", "content": user_msg}],
-                tools=[_PLAN_TOOL],
+                tools=[_OPTIONAL_TESTS_TOOL],
                 tool_choice_name="verification_plan",
                 temperature=0.0,
-                max_tokens=1500,
+                max_tokens=1800,
             )
             if not response.tool_inputs:
-                logger.warning("Main plan LLM returned no tool inputs — using default grain plan")
-                return self._default_plan_no_col_alignment()
-            raw_tests = response.tool_inputs[0].get("tests", [])
+                return []
+            # New flat schema: each test type is a top-level key in the response dict.
+            # Presence of a key = test applies; absence = test not applicable.
+            raw = response.tool_inputs[0]
             specs: list[VerificationTestSpec] = []
-            for t in raw_tests:
+            for test_type in ("null", "duplicate", "ordering", "scale", "boundary", "symmetry"):
+                sub = raw.get(test_type)
+                if not isinstance(sub, dict):
+                    continue
+                # Post-parse validation: discard incomplete specs rather than silently
+                # accepting them with empty/missing required fields.
+                if test_type == "null" and not sub.get("check_columns"):
+                    logger.warning("Discarding null test spec — missing required check_columns")
+                    continue
+                if test_type == "duplicate" and not sub.get("verification_sql"):
+                    logger.warning("Discarding duplicate test spec — missing required verification_sql")
+                    continue
+                if test_type == "ordering" and not sub.get("order_by_column"):
+                    logger.warning("Discarding ordering test spec — missing required order_by_column")
+                    continue
+                if test_type == "scale" and (sub.get("numeric_min") is None or sub.get("numeric_max") is None):
+                    logger.warning("Discarding scale test spec — missing required numeric_min or numeric_max")
+                    continue
+                if test_type == "boundary" and not (sub.get("boundary_description") and sub.get("expected_outcome")):
+                    logger.warning("Discarding boundary test spec — missing required boundary_description or expected_outcome")
+                    continue
+                if test_type == "symmetry" and not sub.get("verification_sql"):
+                    logger.warning("Discarding symmetry test spec — missing required verification_sql")
+                    continue
                 try:
-                    spec = VerificationTestSpec(**t)
-                    if spec.test_type == "column_alignment":
-                        # Skip — column_alignment is handled by the dedicated call
-                        continue
-                    if spec.test_type in _ALL_TEST_TYPES:
-                        specs.append(spec)
-                    else:
-                        logger.warning("Unknown test_type %r in plan — skipped", spec.test_type)
+                    t = {"test_type": test_type, **sub}
+                    # The schema uses "boundary_description" (Gemini rejects "description"
+                    # as a property name — it is a reserved keyword in its schema format).
+                    # VerificationTestSpec also uses boundary_description, so no aliasing needed.
+                    # As a safety net: if the model returns the old "description" key, map it.
+                    if "description" in t and "boundary_description" not in t:
+                        t["boundary_description"] = t.pop("description")
+                    elif "description" in t:
+                        t.pop("description")  # boundary_description already present; drop duplicate
+                    specs.append(VerificationTestSpec(**t))
                 except Exception as e:
-                    logger.warning("Failed to parse VerificationTestSpec: %s", e)
-            if not specs:
-                logger.info(
-                    "Main plan empty for question %.60r — using default grain plan",
-                    question,
-                )
-                return self._default_plan_no_col_alignment()
+                    logger.warning("Failed to parse %r test spec: %s", test_type, e)
             return specs
+        except LLMMalformedToolError as exc:
+            logger.warning("Optional tests MALFORMED_FUNCTION_CALL: %s — returning empty", exc)
+            return []
         except LLMError as exc:
-            logger.warning("Main plan generation failed (LLMError): %s — using default grain plan", exc)
-            return self._default_plan_no_col_alignment()
+            logger.warning("Optional tests LLM failed (LLMError): %s — returning empty", exc)
+            return []
         except Exception as exc:
-            logger.warning("Unexpected error in _generate_main_plan: %s — using default grain plan", exc)
-            return self._default_plan_no_col_alignment()
+            logger.warning("Unexpected error in _generate_optional_tests: %s — returning empty", exc)
+            return []
 
     async def _generate_column_alignment_spec(
         self,
@@ -227,6 +334,7 @@ class QueryVerifier(CheapEvaluatorMixin, ExpensiveEvaluatorMixin):
         count: Optional[int] = None
         reasoning = "Default fallback"
         column_descriptions: list[str] = []
+        confidence: Optional[str] = "medium"
         try:
             client = get_client()
             response = await client.generate(
@@ -242,14 +350,32 @@ class QueryVerifier(CheapEvaluatorMixin, ExpensiveEvaluatorMixin):
                 data = response.tool_inputs[0]
                 count = max(1, int(data.get("expected_column_count", 1)))
                 reasoning = data.get("reasoning", "")
+                raw_col_conf = data.get("confidence", "medium")
+                _valid_col_conf = {"high", "medium", "low"}
+                if raw_col_conf not in _valid_col_conf:
+                    logger.warning(
+                        "Column alignment LLM returned invalid confidence %r — defaulting to 'medium'",
+                        raw_col_conf,
+                    )
+                    raw_col_conf = "medium"
+                confidence = raw_col_conf
                 raw_descs = data.get("column_descriptions", [])
-                column_descriptions = (
-                    raw_descs
-                    if isinstance(raw_descs, list) and len(raw_descs) == count
-                    else []
-                )
+                if isinstance(raw_descs, list) and len(raw_descs) == count:
+                    column_descriptions = raw_descs
+                elif isinstance(raw_descs, list) and raw_descs:
+                    logger.warning(
+                        "column_descriptions length %d != expected_column_count %d — truncating",
+                        len(raw_descs),
+                        count,
+                    )
+                    column_descriptions = raw_descs[:count]
+                else:
+                    column_descriptions = []
             else:
-                logger.warning("Column alignment LLM returned no tool inputs — skipping count check")
+                logger.warning(
+                    "Column alignment LLM returned no tool inputs (finish_reason=%s) — skipping count check",
+                    response.finish_reason,
+                )
         except Exception as exc:
             logger.warning(
                 "column_alignment dedicated call failed: %s — skipping count check", exc
@@ -268,6 +394,7 @@ class QueryVerifier(CheapEvaluatorMixin, ExpensiveEvaluatorMixin):
             test_type="column_alignment",
             expected_column_count=count,
             column_descriptions=column_descriptions,
+            column_alignment_confidence=confidence,
             fix_hint=fix_hint,
         )
 
@@ -280,23 +407,27 @@ class QueryVerifier(CheapEvaluatorMixin, ExpensiveEvaluatorMixin):
         """
         Generate all applicable verification tests for this question.
 
-        Runs two LLM calls concurrently via asyncio.gather():
-          1. _generate_main_plan()  — model_powerful: grain + optional tests
-          2. _generate_column_alignment_spec() — model_fast: dedicated column count
+        Runs three LLM calls concurrently via asyncio.gather():
+          1. _generate_grain_spec()       — model_fast: grain test only
+          2. _generate_optional_tests()   — model_powerful: null/duplicate/ordering/scale/boundary/symmetry
+          3. _generate_column_alignment_spec() — model_fast: dedicated column count
 
-        Returns specs ordered: grain first, column_alignment second, then others.
+        Returns specs ordered: grain first, column_alignment second, then optional tests.
         """
-        main_task = self._generate_main_plan(question, evidence, schema)
+        grain_task = self._generate_grain_spec(question, evidence, schema)
+        optional_task = self._generate_optional_tests(question, evidence, schema)
         col_task = self._generate_column_alignment_spec(question, evidence, schema)
 
-        results = await asyncio.gather(main_task, col_task, return_exceptions=True)
-        main_specs, col_spec = results[0], results[1]
+        results = await asyncio.gather(grain_task, optional_task, col_task, return_exceptions=True)
+        grain_spec, optional_specs, col_spec = results[0], results[1], results[2]
 
-        if isinstance(main_specs, Exception):
-            logger.warning(
-                "Main plan raised unexpectedly: %s — using default grain plan", main_specs
-            )
-            main_specs = self._default_plan_no_col_alignment()
+        if isinstance(grain_spec, Exception):
+            logger.warning("Grain spec raised unexpectedly: %s — using default", grain_spec)
+            grain_spec = _default_grain_spec()
+
+        if isinstance(optional_specs, Exception):
+            logger.warning("Optional tests raised unexpectedly: %s — returning empty", optional_specs)
+            optional_specs = []
 
         if isinstance(col_spec, Exception):
             logger.warning(
@@ -305,12 +436,10 @@ class QueryVerifier(CheapEvaluatorMixin, ExpensiveEvaluatorMixin):
             col_spec = VerificationTestSpec(
                 test_type="column_alignment",
                 expected_column_count=None,
+                column_alignment_confidence="medium",
             )
 
-        # Order: grain first, column_alignment second, then remaining tests
-        grain_specs = [s for s in main_specs if s.test_type == "grain"]
-        other_specs = [s for s in main_specs if s.test_type not in ("grain", "column_alignment")]
-        return grain_specs + [col_spec] + other_specs
+        return [grain_spec, col_spec, *optional_specs]
 
     async def evaluate_candidate(
         self,
@@ -449,8 +578,11 @@ class QueryVerifier(CheapEvaluatorMixin, ExpensiveEvaluatorMixin):
         # Structural pre-check: if the SQL contains any date/time construct,
         # treat the boundary constraint as structurally present.  Only call
         # the expensive LLM judge when no such construct can be found.
+        # NOTE: YEAR and MONTH are excluded — they are common column names, not
+        # SQLite functions, and matching them would cause false-positives for
+        # simple year-equality filters like `WHERE year = 2022`.
         _date_pattern = re.compile(
-            r"\b(BETWEEN|STRFTIME|JULIANDAY|DATE|DATETIME|YEAR|MONTH)\b"
+            r"\b(BETWEEN|STRFTIME|JULIANDAY|DATE|DATETIME)\b"
             r"|[><=!]=?\s*['\"]?\d{4}[-/]"  # comparisons like >= '2014-'
             r"|\bLIKE\s+['\"]%?\d{4}%?['\"]"  # LIKE '2014%'
             r"|\b\d{4}\s+AND\s+\d{4}\b",  # year BETWEEN 2014 AND 2015
@@ -467,37 +599,62 @@ class QueryVerifier(CheapEvaluatorMixin, ExpensiveEvaluatorMixin):
                 is_critical=False,
             )
 
+        boundary_desc = sanitize_prompt_text((spec.boundary_description or "").replace("\n", " ")[:300])
+        expected_outcome = sanitize_prompt_text((spec.expected_outcome or "").replace("\n", " ")[:300])
+        where_clause = sanitize_prompt_text(where_clause)
+
+        # Use function calling for the boundary judgment.
+        # Free-text parsing (.startswith("PASS")) is unreliable with Gemini because
+        # the model typically begins its response with reasoning, not the verdict.
+        _boundary_judgment_tool = ToolParam(
+            name="boundary_judgment",
+            description=(
+                "Judge whether the SQL WHERE clause correctly implements the required "
+                "date/time boundary condition. "
+                "Use PASS if the clause captures the exact required time period "
+                "(possibly in a different syntactic form). "
+                "Use FAIL if the period is wrong, wider, narrower, or absent."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "verdict": {
+                        "type": "string",
+                        "enum": ["PASS", "FAIL"],
+                        "description": (
+                            "PASS — WHERE clause captures the EXACT required time period "
+                            "(syntactic variations are fine: BETWEEN, LIKE prefix, "
+                            "comparison operators, STRFTIME all count as equivalent "
+                            "if the time period is the same). "
+                            "FAIL — time period is wrong, wider, narrower, or absent."
+                        ),
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "One sentence explaining the verdict.",
+                    },
+                },
+                "required": ["verdict", "reason"],
+            },
+        )
+
         prompt = (
-            f"You are an SQL analyst checking whether a SQL query correctly implements"
-            f" a date/time boundary condition.\n\n"
-            f"Boundary requirement: {spec.description}\n"
-            f"Expected outcome: {spec.expected_outcome}\n\n"
+            f"Check whether the SQL WHERE clause correctly implements"
+            f" the required date/time boundary.\n\n"
+            f"Boundary requirement: {boundary_desc}\n"
+            f"Expected outcome: {expected_outcome}\n\n"
             f"SQL WHERE clause:\n{where_clause}\n\n"
-            "IMPORTANT: Judge SEMANTIC EQUIVALENCE, not syntactic form.\n"
-            "Different SQL expressions can represent the same time period correctly.\n\n"
-            "Examples of EQUIVALENT patterns (all should be judged PASS if they target"
-            " the correct period):\n"
-            "  - '2014-2015' ≡ BETWEEN 2014 AND 2015 ≡ year >= 2014 AND year <= 2015\n"
+            "Judge SEMANTIC EQUIVALENCE, not syntactic form.\n"
+            "These are all EQUIVALENT if they cover the EXACT same period:\n"
+            "  - year BETWEEN 2014 AND 2015 ≡ year >= 2014 AND year <= 2015\n"
             "  - year = 2014 ≡ STRFTIME('%Y', col) = '2014' ≡ col LIKE '2014%'"
             " ≡ BETWEEN '2014-01-01' AND '2014-12-31'\n"
             "  - BETWEEN '2014-01-01' AND '2014-06-30' ≡ col >= '2014-01-01'"
             " AND col < '2014-07-01'\n\n"
-            "PASS if:\n"
-            "  - The WHERE clause correctly captures the intended time period,"
-            " even in a different syntactic form.\n"
-            "  - The year/date range matches what the question requires"
-            " (off-by-one rounding is acceptable).\n"
-            "  - The query uses string patterns (LIKE, prefix match) that are logically"
-            " equivalent to a numeric comparison on the same period.\n\n"
-            "FAIL only if:\n"
-            "  - The WHERE clause filters the WRONG time period"
-            " (e.g., 2013 when 2014 is required).\n"
-            "  - There is NO date/time constraint at all when one is clearly required.\n"
-            "  - The date range has a significant off-by-one error that changes which"
-            " rows are returned (e.g., 2014-01-01 to 2014-12-30 instead of 2014-12-31"
-            " is NOT a fail; 2013-01-01 to 2014-11-30 IS a fail).\n\n"
-            "Reply with exactly 'PASS' or 'FAIL' on the first line,"
-            " then a one-sentence explanation."
+            "PASS if the WHERE clause covers the EXACT required period.\n"
+            "FAIL if: wrong year, wrong quarter, wrong month, wider/narrower range,"
+            " or no date constraint at all when one is required.\n\n"
+            "Call boundary_judgment with your verdict and a one-sentence reason."
         )
 
         try:
@@ -506,29 +663,41 @@ class QueryVerifier(CheapEvaluatorMixin, ExpensiveEvaluatorMixin):
                 model=settings.model_fast,
                 system=[CacheableText(text="You are an SQL quality analyst.", cache=False)],
                 messages=[{"role": "user", "content": prompt}],
-                tools=[],
+                tools=[_boundary_judgment_tool],
+                tool_choice_name="boundary_judgment",
                 temperature=0.0,
-                max_tokens=200,
+                max_tokens=400,
             )
-            judgment = (response.text or "").strip().upper()
-            if judgment.startswith("PASS"):
-                status = "pass"
-                logger.debug("boundary: PASS — %s", (response.text or "")[:100])
-            elif judgment.startswith("FAIL"):
-                status = "fail"
-                logger.info("boundary: FAIL — %s", (response.text or "")[:200])
-            else:
-                status = "skip"
-                logger.warning(
-                    "boundary: inconclusive LLM response — %s",
-                    (response.text or "")[:100],
+            if response.tool_inputs:
+                data = response.tool_inputs[0]
+                verdict = (data.get("verdict") or "").strip().upper()
+                reason = (data.get("reason") or "")[:200]
+                if verdict == "PASS":
+                    status = "pass"
+                    logger.debug("boundary: PASS — %s", reason)
+                elif verdict == "FAIL":
+                    status = "fail"
+                    logger.info("boundary: FAIL — %s", reason)
+                else:
+                    status = "skip"
+                    logger.warning("boundary: unexpected verdict %r — skipping", verdict)
+                return VerificationTestResult(
+                    test_type="boundary",
+                    status=status,
+                    actual_outcome=f"LLM judgment: {reason}",
+                    is_critical=False,
                 )
-            return VerificationTestResult(
-                test_type="boundary",
-                status=status,
-                actual_outcome=f"LLM judgment: {(response.text or '')[:200]}",
-                is_critical=False,
-            )
+            else:
+                logger.warning(
+                    "boundary: LLM returned no tool inputs (finish_reason=%s) — skipping",
+                    response.finish_reason,
+                )
+                return VerificationTestResult(
+                    test_type="boundary",
+                    status="skip",
+                    actual_outcome="LLM returned no tool inputs for boundary judgment.",
+                    is_critical=False,
+                )
         except LLMError as exc:
             logger.warning("boundary LLM call failed: %s", exc)
             return VerificationTestResult(
