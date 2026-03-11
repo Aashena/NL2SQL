@@ -707,14 +707,13 @@ def _build_verif_plan_entry(spec, db_path: str) -> dict:
                 pass  # leave as None
     return {
         "test_type": spec.test_type,
-        "description": spec.description,
+        "description": spec.expected_outcome,
         "is_critical": spec.test_type in {"grain", "duplicate", "column_alignment"},
         "fix_hint": spec.fix_hint,
         "verification_sql_upper": spec.verification_sql_upper,
         "verification_sql": spec.verification_sql,
         "upper_bound_value": upper_bound_value,
         "row_count_min": spec.row_count_min,
-        "row_count_max": spec.row_count_max,
         "expected_column_count": spec.expected_column_count,
         "required_sql_keywords": spec.required_sql_keywords,
         "check_columns": spec.check_columns,

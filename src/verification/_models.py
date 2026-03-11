@@ -19,9 +19,9 @@ class VerificationTestSpec(BaseModel):
     test_type: str
     """One of: grain|null|duplicate|ordering|scale|
     column_alignment|boundary|symmetry"""
-    description: str = ""
-    """Human-readable description of what this test checks.
-    Only required for boundary (used in the LLM judge prompt)."""
+    boundary_description: str = ""
+    """Boundary test: the specific time window from the question
+    (e.g. 'Q1 2022 (January–March 2022)'). Used in the LLM judge prompt."""
     verification_sql: Optional[str] = None
     """Direct SQL query against the raw database (NOT a template wrapping the
     candidate SQL). Used for grain, duplicate, and symmetry tests."""
@@ -43,11 +43,16 @@ class VerificationTestSpec(BaseModel):
     """For grain test: SQL returning an integer upper bound on result rows
     (e.g. SELECT COUNT(DISTINCT id) FROM students).
     For grain only; verification_sql continues to serve duplicate/symmetry tests."""
+    upper_bound_confidence: Optional[str] = None
+    """For grain test: LLM confidence in verification_sql_upper.
+    Values: 'high' | 'medium' | 'low' | 'none'.
+    When 'none', _eval_grain skips the test entirely."""
     row_count_min: Optional[int] = None
-    """For grain test: static lower bound. When None, effective lower is 1
-    (enforced with max(value, 1)). Empty results are always wrong."""
-    row_count_max: Optional[int] = None
-    """For grain test: static integer upper bound when no bounding SQL is available."""
+    """For grain test: static lower bound. When None, effective lower is 1.
+    Set to 0 when the question may legitimately return empty results
+    (e.g. 'List students with GPA above 4.5' — there may be none).
+    Set > 1 when the question guarantees at least N rows
+    (e.g. 'List the top 3 students' → row_count_min = 3)."""
     expected_column_count: Optional[int] = None
     """For column_alignment test (canonical) or grain test (legacy):
     expected number of output columns.
@@ -55,6 +60,10 @@ class VerificationTestSpec(BaseModel):
     column_descriptions: list[str] = Field(default_factory=list)
     """For column_alignment test: one short semantic label per expected SELECT column
     (e.g. ['student name', 'enrollment count']). Length equals expected_column_count."""
+    column_alignment_confidence: Optional[str] = None
+    """For column_alignment: LLM confidence in expected_column_count.
+    Values: 'high' | 'medium' | 'low'.
+    When 'low', _eval_column_alignment skips the test."""
     numeric_min: Optional[float] = None
     """For scale test: minimum expected value for numeric result columns."""
     numeric_max: Optional[float] = None

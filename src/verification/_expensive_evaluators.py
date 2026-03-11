@@ -53,6 +53,14 @@ class ExpensiveEvaluatorMixin:
                 is_critical=True,
             )
 
+        if spec.column_alignment_confidence == "low":
+            return VerificationTestResult(
+                test_type="column_alignment",
+                status="skip",
+                actual_outcome="Skipped — LLM reported low confidence in expected column count.",
+                is_critical=True,
+            )
+
         if not exec_result.rows:
             return VerificationTestResult(
                 test_type="column_alignment",
